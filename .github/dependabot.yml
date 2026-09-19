@@ -9,124 +9,14 @@
 # Grouping keeps the PR volume sane for a solo maintainer: one grouped PR per
 # ecosystem per week instead of one PR per dependency.
 
+# Phase 0/1 of AegisLink Work: only the GitHub Actions ecosystem exists yet. The
+# npm (mobile/server/desktop) and docker (server, infra/tor) entries below are
+# copied verbatim from the personal repo and re-enabled — one per package — in
+# the PR that creates that package (phase 2 / phase 6), so Dependabot never runs
+# against a directory that is not there (each such run shows as a failed job).
+
 version: 2
 updates:
-  # ── Mobile (Expo SDK 54 + React Native) ──────────────────────────────────
-  - package-ecosystem: npm
-    directory: /mobile
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - mobile
-    groups:
-      mobile-minor-patch:
-        update-types:
-          - minor
-          - patch
-    # Expo/RN native modules are pinned to the SDK; never auto-bump them here.
-    # `expo-*` covers every Expo module (expo-status-bar, expo-sqlite,
-    # expo-file-system, …): their majors track the SDK line, so a bump to the
-    # next SDK's major breaks the native install even when JS-only CI is green.
-    #
-    # React Native uses 0.x versioning where a *minor* (0.81 -> 0.86) is an
-    # effectively-breaking native change pinned to the Expo SDK — ignore minors
-    # too, not just majors. `react` is bundled by RN, and reanimated/worklets
-    # ship native code matched to the RN version: keep all three on the SDK line.
-    # These SDK bumps belong to a deliberate Expo-SDK-upgrade PR with on-device
-    # testing, never a routine dependency bump.
-    ignore:
-      - dependency-name: expo
-        update-types: [version-update:semver-major]
-      - dependency-name: "expo-*"
-        update-types: [version-update:semver-major]
-      - dependency-name: react-native
-        update-types: [version-update:semver-major, version-update:semver-minor]
-      # `react` is pinned to the EXACT version React Native bundles its
-      # `react-native-renderer` at (19.1.4 on SDK 54). Even a PATCH bump breaks
-      # every RNTL test with "Incompatible React versions: react 19.1.8 vs
-      # react-native-renderer 19.1.4" (PR #351) — so ignore patch too, not just
-      # major/minor. React moves only when the SDK's RN moves.
-      - dependency-name: react
-        update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]
-      - dependency-name: react-native-reanimated
-        update-types: [version-update:semver-major, version-update:semver-minor]
-      - dependency-name: react-native-worklets
-        update-types: [version-update:semver-major, version-update:semver-minor]
-      # react-test-renderer's peer dep requires its version to match `react`
-      # EXACTLY — and react is pinned to the Expo SDK's line (19.1.x on SDK 54,
-      # ignored above). Letting dependabot bump the renderer alone produced an
-      # unresolvable ERESOLVE group PR (#321: renderer 19.2.7 vs react 19.1.8).
-      # Same lockstep for @types/react. Both move only in the SDK-upgrade PR.
-      # Patch included for the renderer too: it must equal `react` exactly, and
-      # `react` is now frozen on all three update types (see the note above).
-      - dependency-name: react-test-renderer
-        update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]
-      - dependency-name: "@types/react"
-        update-types: [version-update:semver-major, version-update:semver-minor]
-      # babel-preset-expo's MAJOR tracks the Expo SDK line (54.x ↔ SDK 54):
-      # bumping it alone points the Babel preset at the NEXT SDK's toolchain
-      # and npm ci can't even install (PR #324). Moves in the SDK-upgrade PR.
-      - dependency-name: babel-preset-expo
-        update-types: [version-update:semver-major]
-      # @config-plugins/* majors also track the Expo SDK line (PR #323).
-      - dependency-name: "@config-plugins/*"
-        update-types: [version-update:semver-major]
-      # TypeScript majors are blocked by the toolchain's peer ranges (ts-jest@29
-      # pins typescript >=4.3 <7 — PR #322): the bump alone can never install.
-      # Bump deliberately together with the toolchain, then drop this rule.
-      - dependency-name: typescript
-        update-types: [version-update:semver-major]
-
-  # ── Relay server (Node/Bun, AGPL) ────────────────────────────────────────
-  - package-ecosystem: npm
-    directory: /server
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - server
-    groups:
-      server-minor-patch:
-        update-types:
-          - minor
-          - patch
-    ignore:
-      # ts-jest@29 pins typescript >=4.3 <7 (PR #317): a TS major alone can
-      # never npm-ci. Bump together with ts-jest once it supports TS 7, then
-      # drop this rule.
-      - dependency-name: typescript
-        update-types: [version-update:semver-major]
-
-  # ── Desktop (Electron) ───────────────────────────────────────────────────
-  - package-ecosystem: npm
-    directory: /desktop
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - desktop
-    groups:
-      desktop-minor-patch:
-        update-types:
-          - minor
-          - patch
-    # Electron majors carry security-relevant Chromium/Node changes and need a
-    # packaged smoke-test before merge — keep them as separate, visible PRs.
-    ignore:
-      - dependency-name: electron
-        update-types: [version-update:semver-major]
-      # electron-vite@5 pins vite ^4–^7 (PR #320): vite 8 can't install until
-      # electron-vite ships support. Bump both together, then drop this rule.
-      - dependency-name: vite
-        update-types: [version-update:semver-major]
-
   # ── GitHub Actions (pin and keep CI actions current) ─────────────────────
   - package-ecosystem: github-actions
     directory: /
@@ -143,25 +33,144 @@ updates:
           - minor
           - patch
 
-  # ── Docker base images (supply-chain: watch relay + tor sidecar) ──────────
-  # Closes "base image can auto-upgrade silently" (audit 2026-07) the durable
-  # way — monitored, reviewable bumps of node:22-alpine / alpine:3.x instead of
-  # a hand-pinned digest that goes stale and misses security patches.
-  - package-ecosystem: docker
-    directory: /server
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - docker
-  - package-ecosystem: docker
-    directory: /infra/tor
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - docker
+# ── Re-enable in phase 2 (mobile/server/desktop) and phase 6 (docker) ───────
+# The blocks are kept here commented so the ignore rules (Expo SDK pins, React
+# lockstep, ts-jest/TypeScript, electron-vite/vite) travel with the repo.
+#  # ── Mobile (Expo SDK 54 + React Native) ──────────────────────────────────
+#  - package-ecosystem: npm
+#    directory: /mobile
+#    schedule:
+#      interval: weekly
+#      day: monday
+#    open-pull-requests-limit: 5
+#    labels:
+#      - dependencies
+#      - mobile
+#    groups:
+#      mobile-minor-patch:
+#        update-types:
+#          - minor
+#          - patch
+#    # Expo/RN native modules are pinned to the SDK; never auto-bump them here.
+#    # `expo-*` covers every Expo module (expo-status-bar, expo-sqlite,
+#    # expo-file-system, …): their majors track the SDK line, so a bump to the
+#    # next SDK's major breaks the native install even when JS-only CI is green.
+#    #
+#    # React Native uses 0.x versioning where a *minor* (0.81 -> 0.86) is an
+#    # effectively-breaking native change pinned to the Expo SDK — ignore minors
+#    # too, not just majors. `react` is bundled by RN, and reanimated/worklets
+#    # ship native code matched to the RN version: keep all three on the SDK line.
+#    # These SDK bumps belong to a deliberate Expo-SDK-upgrade PR with on-device
+#    # testing, never a routine dependency bump.
+#    ignore:
+#      - dependency-name: expo
+#        update-types: [version-update:semver-major]
+#      - dependency-name: "expo-*"
+#        update-types: [version-update:semver-major]
+#      - dependency-name: react-native
+#        update-types: [version-update:semver-major, version-update:semver-minor]
+#      # `react` is pinned to the EXACT version React Native bundles its
+#      # `react-native-renderer` at (19.1.4 on SDK 54). Even a PATCH bump breaks
+#      # every RNTL test with "Incompatible React versions: react 19.1.8 vs
+#      # react-native-renderer 19.1.4" (PR #351) — so ignore patch too, not just
+#      # major/minor. React moves only when the SDK's RN moves.
+#      - dependency-name: react
+#        update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]
+#      - dependency-name: react-native-reanimated
+#        update-types: [version-update:semver-major, version-update:semver-minor]
+#      - dependency-name: react-native-worklets
+#        update-types: [version-update:semver-major, version-update:semver-minor]
+#      # react-test-renderer's peer dep requires its version to match `react`
+#      # EXACTLY — and react is pinned to the Expo SDK's line (19.1.x on SDK 54,
+#      # ignored above). Letting dependabot bump the renderer alone produced an
+#      # unresolvable ERESOLVE group PR (#321: renderer 19.2.7 vs react 19.1.8).
+#      # Same lockstep for @types/react. Both move only in the SDK-upgrade PR.
+#      # Patch included for the renderer too: it must equal `react` exactly, and
+#      # `react` is now frozen on all three update types (see the note above).
+#      - dependency-name: react-test-renderer
+#        update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]
+#      - dependency-name: "@types/react"
+#        update-types: [version-update:semver-major, version-update:semver-minor]
+#      # babel-preset-expo's MAJOR tracks the Expo SDK line (54.x ↔ SDK 54):
+#      # bumping it alone points the Babel preset at the NEXT SDK's toolchain
+#      # and npm ci can't even install (PR #324). Moves in the SDK-upgrade PR.
+#      - dependency-name: babel-preset-expo
+#        update-types: [version-update:semver-major]
+#      # @config-plugins/* majors also track the Expo SDK line (PR #323).
+#      - dependency-name: "@config-plugins/*"
+#        update-types: [version-update:semver-major]
+#      # TypeScript majors are blocked by the toolchain's peer ranges (ts-jest@29
+#      # pins typescript >=4.3 <7 — PR #322): the bump alone can never install.
+#      # Bump deliberately together with the toolchain, then drop this rule.
+#      - dependency-name: typescript
+#        update-types: [version-update:semver-major]
+
+#  # ── Relay server (Node/Bun, AGPL) ────────────────────────────────────────
+#  - package-ecosystem: npm
+#    directory: /server
+#    schedule:
+#      interval: weekly
+#      day: monday
+#    open-pull-requests-limit: 5
+#    labels:
+#      - dependencies
+#      - server
+#    groups:
+#      server-minor-patch:
+#        update-types:
+#          - minor
+#          - patch
+#    ignore:
+#      # ts-jest@29 pins typescript >=4.3 <7 (PR #317): a TS major alone can
+#      # never npm-ci. Bump together with ts-jest once it supports TS 7, then
+#      # drop this rule.
+#      - dependency-name: typescript
+#        update-types: [version-update:semver-major]
+
+#  # ── Desktop (Electron) ───────────────────────────────────────────────────
+#  - package-ecosystem: npm
+#    directory: /desktop
+#    schedule:
+#      interval: weekly
+#      day: monday
+#    open-pull-requests-limit: 5
+#    labels:
+#      - dependencies
+#      - desktop
+#    groups:
+#      desktop-minor-patch:
+#        update-types:
+#          - minor
+#          - patch
+#    # Electron majors carry security-relevant Chromium/Node changes and need a
+#    # packaged smoke-test before merge — keep them as separate, visible PRs.
+#    ignore:
+#      - dependency-name: electron
+#        update-types: [version-update:semver-major]
+#      # electron-vite@5 pins vite ^4–^7 (PR #320): vite 8 can't install until
+#      # electron-vite ships support. Bump both together, then drop this rule.
+#      - dependency-name: vite
+#        update-types: [version-update:semver-major]
+
+#  # ── Docker base images (supply-chain: watch relay + tor sidecar) ──────────
+#  # Closes "base image can auto-upgrade silently" (audit 2026-07) the durable
+#  # way — monitored, reviewable bumps of node:22-alpine / alpine:3.x instead of
+#  # a hand-pinned digest that goes stale and misses security patches.
+#  - package-ecosystem: docker
+#    directory: /server
+#    schedule:
+#      interval: weekly
+#      day: monday
+#    open-pull-requests-limit: 5
+#    labels:
+#      - dependencies
+#      - docker
+#  - package-ecosystem: docker
+#    directory: /infra/tor
+#    schedule:
+#      interval: weekly
+#      day: monday
+#    open-pull-requests-limit: 5
+#    labels:
+#      - dependencies
+#      - docker
