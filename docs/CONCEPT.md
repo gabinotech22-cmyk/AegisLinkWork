@@ -1,6 +1,7 @@
 # AegisLink Work — Concepto de producto
 
-> **Estado:** ✅ Diseño aprobado (2026-09-19, decisiones del dueño registradas en `docs/adr/`).
+> **Estado:** ✅ Diseño v1.1 (2026-09-19; revisión de incongruencias aplicada — ver §10).
+> Decisiones del dueño registradas en `docs/adr/`.
 > Este doc define **qué** es Work y por qué es distinto del AegisLink personal. El **cómo**
 > vive en `THREAT-MODEL.md`, `DATA-MODEL.md`, `PROTOCOL.md`, `ADMIN-CONSOLE.md` y
 > `DEPLOYMENT-MODES.md`. Estado de implementación: `ROADMAP.md`.
@@ -56,18 +57,27 @@ sealed-sender, paridad mobile↔desktop, código abierto.
 
 ## 5. Flujos principales
 
+### 5.0 Primer arranque
+Sin camino anónimo: la pantalla de bienvenida ofrece **Tengo una invitación**, **Crear
+organización** o **Restaurar perfil Work**. Un dispositivo puede pertenecer a **varias
+organizaciones** como perfiles aislados (DB y claves separadas, `OrgSwitcher`): un consultor o
+auditor externo enrola una vez por org.
+
 ### 5.1 Crear una organización (Owner)
 1. El owner instala Work y crea la org **en su dispositivo**: se genera la **clave de firma de la
    org** (Ed25519) y su **fingerprint de org** (verificable por todos los miembros).
 2. Elige modo: usar el servicio alojado (SaaS, `TENANCY=multi`) o apuntar a su propio relay
    (`single`). El relay solo recibe la clave pública de la org.
 3. Define políticas iniciales (retención máxima, adjuntos, app-lock, invitados) y las firma.
-4. Guarda el **backup cifrado de la clave de org** (frase de recuperación, solo suya).
+4. Guarda el **backup cifrado de la clave de org** (frase de recuperación, solo suya) — paso
+   obligatorio antes de poder invitar a nadie.
 
 ### 5.2 Enrolar un miembro (Admin → Member)
-1. El admin crea una **invitación firmada**: `{orgId, rol, equipo, caducidad, nonce}` firmada con
-   su clave de admin (y encadenada al certificado que el owner le dio). Se entrega como código,
-   QR o enlace **fuera de banda**.
+1. El admin crea una **invitación firmada**: `{orgId, orgFingerprint, relayUrl, relayPins?, rol,
+   equipo, caducidad, nonce}` firmada con su clave de admin (y encadenada al certificado que el
+   owner le dio). **La invitación fija el relay** (SaaS o propio) y, si es self-hosted, el pin
+   TLS de ese relay: el miembro nunca elige relay. Se entrega como código, QR o enlace **fuera
+   de banda**.
 2. El nuevo miembro instala Work, genera su identidad **en el dispositivo** (como el personal:
    nada sale) y presenta la invitación.
 3. El relay comprueba la firma y la caducidad, consume el nonce (un solo uso) y registra la
@@ -77,15 +87,22 @@ sealed-sender, paridad mobile↔desktop, código abierto.
    el **certificado de membresía** `{orgId, aegisId, displayName, rol, deviceKey, validez}`.
 5. El miembro ve la org, su fingerprint, y las salas abiertas. Los miembros de cada sala reciben
    un mensaje de sistema "Nuevo miembro/dispositivo" al distribuirle la clave de sala.
+6. **Segundo dispositivo**: el miembro lo enlaza desde un dispositivo ya verificado (QR, como el
+   enlace de dispositivos del personal) y queda `pending` hasta que un admin lo aprueba. Así se
+   prueba a la vez que es suyo (enlace) y que la org lo acepta (aprobación).
 
 ### 5.3 Salas
 - **Abierta**: cualquier miembro de la org puede entrar; la clave de sala (SenderKey) se le
   distribuye sellada por cada miembro existente. El relay solo sabe quién es miembro.
 - **Privada**: creada por admin o por un miembro con permiso; entrada por invitación de un
   miembro de la sala. Los guests solo existen aquí.
+- **Anuncios**: solo los moderadores publican, todos leen (sustituye a broadcast y listas de
+  distribución del personal).
 - **DM**: Double Ratchet pairwise + sealed-sender; el relay no ve el emisor.
-- Toda sala tiene: hilos, pins, reacciones, adjuntos cifrados, mensajes programados y efímeros,
-  y una **lista de dispositivos** visible a todos sus miembros.
+- Toda sala tiene: hilos, pins, reacciones, **encuestas con voto anónimo E2EE** (heredadas),
+  adjuntos cifrados, mensajes programados y efímeros, y una **lista de dispositivos** visible a
+  todos sus miembros. Llamadas de sala en malla para grupos pequeños (heredadas del personal);
+  reuniones grandes con SFU en fase 5.
 
 ### 5.4 Revocar un dispositivo (Admin)
 1. El admin marca el dispositivo como revocado (acción firmada, auditada).
@@ -101,6 +118,12 @@ sealed-sender, paridad mobile↔desktop, código abierto.
    "Forzado por la organización" donde toque.
 3. Un cliente que no puede cumplir la política (versión antigua) queda en modo solo-lectura hasta
    actualizar. Fail-closed, no silencioso.
+
+### 5.7 Abandonar la organización (Member)
+Desde Work Privacy: wipe local del perfil de esa org y acción firmada `member.left`; el
+certificado deja de ser válido al primer reto de socket. Los registros de auditoría que
+referencian su AegisID **persisten** (rendición de cuentas de la org), y se le informa antes.
+El modo pánico borra todos los perfiles sin avisar a nadie (silencioso por diseño).
 
 ### 5.6 Rotación de claves
 - Clave de sala: automática al revocar o expulsar, y por política (`maxKeyAgeDays`).
@@ -133,9 +156,12 @@ La tabla completa de metadatos, con justificación de cada fila, está en `THREA
 ## 8. Fuera de alcance (v1)
 
 - Escrow, "compliance mode" o cualquier lectura por parte de la org (decisión: ADR-0002).
+- Buzones ciegos (mailbox IDs) como en el personal: el relay Work necesita conocer la membresía
+  para administrar. Declarado en `THREAT-MODEL.md` §4 y `SECURITY-PARITY.md` §3.
 - SSO/SAML/OIDC como identidad: rompe el pseudonimato y ata la identidad a un IdP externo. Se
   evalúa **solo** como gate de enrolamiento (no como identidad) en una fase posterior.
-- Reuniones multi-parte E2EE (SFU con cifrado por frame): fase 5, diseño aparte.
+- Reuniones grandes E2EE (SFU con cifrado por frame): fase 5, diseño aparte. Las llamadas de
+  sala pequeñas (malla) se heredan del personal en la fase 4.
 - Integraciones/bots: no antes de tener un modelo de "bot como dispositivo de la org" auditado.
 - Federación entre organizaciones: no en v1.
 
@@ -147,3 +173,21 @@ diseño") y `prototype/screens.jsx` (enrolamiento corporativo, "Restore Work Pro
 Privacy") son la referencia visual. El código Work anterior que vivió en el repo personal
 (`976c09f`) **no** se reutiliza: sus tres hallazgos de auditoría (firmas admin sin atar payload,
 REST que persistía texto plano, CSV sin escape) se evitan por construcción en `PROTOCOL.md`.
+
+## 10. Revisión de incongruencias (2026-09-19)
+
+Cruce del concepto v1 contra las 53 pantallas y las defensas del personal. Cambios aplicados
+en esta versión (detalle en `SCREENS.md` y `SECURITY-PARITY.md`):
+
+| # | Incongruencia detectada | Resolución |
+|---|---|---|
+| 1 | La invitación no decía a **qué relay** conectarse (SaaS vs self-host) ni su pin TLS | `Invite` lleva `relayUrl` + `relayPins`; `RelaySettings` desaparece del cliente |
+| 2 | "Un perfil Work por app" impedía que un auditor/consultor pertenezca a 2 orgs (rol `guest` lo exige) | Perfiles aislados **por organización** (`OrgSwitcher`), heredando la infraestructura de perfiles del personal |
+| 3 | Se eliminaban grupos con **votación anónima**, broadcast y listas — pero son útiles y diferenciadores en una org | Encuestas anónimas dentro de salas; sala tipo `announcement` |
+| 4 | "Reuniones multi-parte desde cero en fase 5" ignoraba que el personal **ya tiene** llamadas de grupo en malla | Se heredan como `RoomCall` (≤ 6) en fase 4; SFU solo para salas grandes |
+| 5 | El segundo dispositivo de un miembro no tenía flujo: ¿lo enlaza él o lo enrola el admin? | Ambos: enlace desde dispositivo verificado (prueba de propiedad) + aprobación admin (control de la org) |
+| 6 | Sin camino para el **owner** en el arranque (solo invitación) | `Welcome` con tres caminos; `OrgCreate` exige backup de clave de org antes de invitar |
+| 7 | Borrado de cuenta del personal no encaja con auditoría de org | "Abandonar organización": wipe local + `member.left`; auditoría persiste (declarado) |
+| 8 | Políticas incompletas: ver-una-vez, ubicación, vistas previas de notificación, backup, exportación, aviso de runtime comprometido no estaban gobernados | Añadidos `viewOnce`, `locationSharing`, `notificationPreviews`, `allowBackup`, `allowExport`, `warnOnCompromisedRuntime` |
+| 9 | El pinning TLS del personal está fijado en build; imposible para relays self-hosted | Pin en la invitación (fila en `SECURITY-PARITY.md` §4) |
+| 10 | Paridad de seguridad no estaba escrita: riesgo de "olvidar" defensas del personal al copiar | `SECURITY-PARITY.md` con las ~40 defensas y su estado por fase; `qa-lead` la audita al cierre de 2, 3 y 4 |

@@ -250,6 +250,8 @@ doc desactualizada no es un detalle cosmético: es deuda que **duplica trabajo**
    | `mobile/src/crypto/**`, `desktop/src/**/crypto/**` | `docs/PROTOCOL.md` |
    | Orgs, miembros, dispositivos, salas, políticas (server + clientes) | `docs/DATA-MODEL.md` |
    | Consola admin, auditoría, roles por acción | `docs/ADMIN-CONSOLE.md` |
+   | Inventario de pantallas (heredadas/adaptadas/nuevas/no van) | `docs/SCREENS.md` |
+   | Paridad de seguridad con el AegisLink personal | `docs/SECURITY-PARITY.md` |
    | Qué metadatos conoce el relay | `docs/THREAT-MODEL.md` |
    | Modo multi/single-tenant | `docs/DEPLOYMENT-MODES.md` |
    | Tema, tokens, componentes | `docs/DESIGN-SYSTEM.md` |
