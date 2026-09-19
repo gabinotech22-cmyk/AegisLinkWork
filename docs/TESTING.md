@@ -18,6 +18,8 @@
 
 Otros workflows activos desde el día 0:
 - `codeql.yml` — SAST semántico JS/TS (security-extended), config en `.github/codeql/codeql-config.yml`.
+  Se salta el análisis (paso `Detect product code`) mientras no exista ningún `package.json` de
+  `server/`, `mobile/` o `desktop/`: CodeQL falla en duro si no ve código fuente.
 - `semgrep.yml` — packs públicos + `.semgrep/aegislink-rules.yml`, que codifica las **Reglas de Oro de
   seguridad** (fail-closed, sin `plain:`, sin material de clave en logs…). Hereda las reglas del
   AegisLink normal; las reglas específicas Work (firmas admin atadas al payload, sin REST de mensajes)
