@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>AegisLink — App Store Screenshots</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=EB+Garamond:ital,wght@0,500;1,500&display=swap"/>
+  <style>
+    html, body { margin: 0; padding: 0; background: #0a0e0d; }
+    * { box-sizing: border-box; }
+    #root { width: 1284px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="theme.jsx"></script>
+  <script type="text/babel" src="icons.jsx"></script>
+  <script type="text/babel" src="logo.jsx"></script>
+  <script type="text/babel" src="screens.jsx"></script>
+  <script type="text/babel" src="store-shots.jsx"></script>
+
+  <script type="text/babel" data-presets="env,react">
+    const { VAULT, IOSDevice, getStoreShots, getStoreShotLang } = window;
+
+    // Content (captions + mock screens, all three locales) lives in store-shots.jsx,
+    // shared with playstore-shots.html. This file is only the App Store canvas.
+    // URL: ?shot=<id>&lang=en|es|it — see scripts/capture-store-shots.mjs.
+
+    function ShotCanvas({ shot }) {
+      const t = VAULT;
+      const Screen = shot.Screen;
+
+      // Canvas 1284×2778 — App Store's iPhone 6.5"/6.7" portrait screenshot size.
+      return (
+        <div style={{
+          width: 1284, height: 2778, position: 'relative', overflow: 'hidden',
+          background: `linear-gradient(180deg, ${t.bg} 0%, #0d1513 55%, ${t.bg} 100%)`,
+          fontFamily: t.font,
+        }}>
+          {/* ambient accent glow */}
+          <div style={{
+            position: 'absolute', top: -260, left: '50%', transform: 'translateX(-50%)',
+            width: 1300, height: 1010, borderRadius: '50%',
+            background: `radial-gradient(circle, ${t.accent}22 0%, transparent 65%)`,
+          }}/>
+
+          {/* caption — fixed-height zone, never overlaps the device below */}
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 578, zIndex: 2, padding: '116px 130px 0' }}>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              fontFamily: t.fontMono, fontSize: 29, fontWeight: 600,
+              color: t.accent, letterSpacing: '0.12em', marginBottom: 29,
+            }}>
+              <span style={{ width: 12, height: 12, borderRadius: '50%', background: t.accent }}/>
+              {shot.kicker}
+            </div>
+            <div style={{
+              fontFamily: '"EB Garamond", serif', fontStyle: 'italic', fontWeight: 500,
+              fontSize: 72, lineHeight: 1.16, letterSpacing: '-0.01em',
+              color: t.text, whiteSpace: 'pre-line',
+            }}>{shot.headline}</div>
+          </div>
+
+          {/* device mockup — fixed top-anchored zone below the caption */}
+          <div style={{
+            position: 'absolute', left: '50%', top: 607,
+            transform: 'translateX(-50%) scale(1.97)', transformOrigin: 'top center',
+            zIndex: 2, filter: 'drop-shadow(0 40px 70px rgba(0,0,0,0.55))',
+          }}>
+            <IOSDevice width={402} height={874} dark={t.dark}>
+              <div style={{
+                position: 'absolute', inset: 0, top: 62, bottom: 34,
+                background: t.bg, color: t.text,
+                display: 'flex', flexDirection: 'column', overflow: 'hidden',
+              }}>
+                <Screen t={t} c={shot.copy} store="app"/>
+              </div>
+            </IOSDevice>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const shots = getStoreShots(getStoreShotLang());
+      const id = new URLSearchParams(window.location.search).get('shot');
+      const shot = shots.find(s => s.id === id) || shots[0];
+      return <ShotCanvas shot={shot}/>;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>

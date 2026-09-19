@@ -1,0 +1,304 @@
+# CI Pipeline — AegisLink Work (tests + typecheck; NO deploys)
+#
+# Mirrors the AegisLink (personal edition) pipeline job-for-job so the golden
+# rules are enforced identically in both repos. Differences:
+#   - Package jobs (server/mobile/desktop) run only once that package exists
+#     (`detect` job): phase 0/1 of this repo is docs + prototype only, and a
+#     red X for a missing package.json would teach everyone to ignore CI.
+#   - `repo-hygiene` enforces the structure + operator-local golden rules
+#     mechanically (sacred root, no personal machine paths, no build output).
+#   - EAS / E2E / fuzz / permissions-audit / self-host smoke jobs are added in
+#     the phase that creates what they test (docs/TESTING.md tracks which).
+#
+# Required GitHub Secrets (later phases): EXPO_TOKEN (EAS), APPLE_ID, ASC_APP_ID.
+# NOTE: Never add user data, real IPs, or encryption keys to these secrets.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+  schedule:
+    # Nightly run gives an automatic signal on main without blocking PRs.
+    - cron: '0 4 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege GITHUB_TOKEN: CI only reads code, builds and tests — it never
+# writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  # ─── Which packages exist / which areas did this PR touch? ────────────────
+  # FAIL-SAFE BY CONSTRUCTION: `changed_*` outputs `true` unless it positively
+  # proves nothing under that package changed. `has_*` is a plain existence
+  # check on the package lockfile.
+  detect:
+    name: Detect packages and changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      has_server: ${{ steps.pkgs.outputs.has_server }}
+      has_mobile: ${{ steps.pkgs.outputs.has_mobile }}
+      has_desktop: ${{ steps.pkgs.outputs.has_desktop }}
+      mobile: ${{ steps.filter.outputs.mobile }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the three-dot diff below needs the merge base.
+          fetch-depth: 0
+
+      - id: pkgs
+        run: |
+          for p in server mobile desktop; do
+            if [ -f "$p/package-lock.json" ]; then v=true; else v=false; fi
+            echo "has_$p=$v" >> "$GITHUB_OUTPUT"
+            echo "has_$p=$v"
+          done
+
+      - id: filter
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request (${{ github.event_name }}) — run everything."
+            echo "mobile=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE="origin/${{ github.base_ref }}"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          if [ -z "$CHANGED" ]; then
+            echo "Could not determine changed files — assuming mobile changed."
+            echo "mobile=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Changed files:"; echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '^(mobile/|\.github/workflows/ci\.yml$)'; then
+            echo "mobile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mobile=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─── Repo hygiene gate ────────────────────────────────────────────────────
+  # Golden rules "Estructura y ubicación de archivos" and "Herramientas
+  # destructivas y operador-local" (CLAUDE.md), checked mechanically:
+  #   1. The root is sacred: only the closed list of files/dirs may live there.
+  #   2. No personal machine paths (C:\Users\<name>, /home/<name>) in tracked files.
+  #   3. No build/test output tracked (coverage/, dist/, *.apk, *.zip ...).
+  repo-hygiene:
+    name: Repo hygiene gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Root is sacred
+        run: |
+          set -e
+          ALLOWED='^(README\.md|LICENSE|SECURITY\.md|CLAUDE\.md|\.gitignore|\.env\.example|docker-compose\.yml|skills-lock\.json|\.github|\.claude|\.semgrep|\.semgrepignore|docs|prototype|mobile|desktop|server|infra|web|scripts|promo-video)$'
+          BAD=$(git ls-files | awk -F/ '{print $1}' | sort -u | grep -vE "$ALLOWED" || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Files/dirs in the repo root that are not on the allowed list (docs/PROJECT-STRUCTURE.md):"
+            echo "$BAD"; exit 1
+          fi
+          echo "Root OK."
+
+      - name: No personal machine paths in tracked files
+        run: |
+          set -e
+          HITS=$(git ls-files -z | xargs -0 grep -nIE '([A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9_.-]+|/home/[A-Za-z0-9_.-]+/)' \
+            --exclude-dir=node_modules -- 2>/dev/null \
+            | grep -vE '^\.github/workflows/ci\.yml:' \
+            | grep -vE '(/home/ubuntu/|/home/aegis/|<usuario>|<nombre>|<name>|<user>)' || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::Personal machine paths found (golden rule: operador-local #3):"
+            echo "$HITS"; exit 1
+          fi
+          echo "No personal paths."
+
+      - name: No build/test artifacts tracked
+        run: |
+          set -e
+          BAD=$(git ls-files | grep -E '(^|/)(coverage|lcov-report|dist|node_modules)/|\.(apk|aab|ipa|zip|tar\.gz|mp4|log)$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Build/test artifacts or binaries are tracked (golden rule: operador-local #4):"
+            echo "$BAD"; exit 1
+          fi
+          echo "No artifacts tracked."
+
+  # ─── Docs ↔ code sync gate ────────────────────────────────────────────────
+  # Golden rule "La doc no miente" #7 (CLAUDE.md). A PR that touches product
+  # code without touching any doc must say so explicitly in its body with
+  # `Docs: none — <reason>` (field in the PR template). Tests are excluded — a
+  # test-only PR changes no behaviour a doc could describe.
+  docs-sync:
+    name: Docs sync gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a doc change or an explicit Docs-none declaration
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -e
+          BASE="origin/${{ github.base_ref }}"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          echo "Changed files:"; echo "$CHANGED"
+
+          CODE=$(echo "$CHANGED" \
+            | grep -E '^(server/src/|mobile/src/|desktop/src/|\.github/workflows/)' \
+            | grep -vE '(^|/)__tests__/|\.test\.[cm]?[jt]sx?$|\.spec\.[cm]?[jt]sx?$' || true)
+          if [ -z "$CODE" ]; then
+            echo "No product code changed - nothing to sync."
+            exit 0
+          fi
+
+          DOCS=$(echo "$CHANGED" | grep -E '^(docs/|README\.md$|CLAUDE\.md$|SECURITY\.md$)' || true)
+          if [ -n "$DOCS" ]; then
+            echo "Docs touched alongside code:"; echo "$DOCS"
+            exit 0
+          fi
+
+          # 'Docs: none — reason' (em dash or hyphen), reason non-empty.
+          if printf '%s\n' "$PR_BODY" | grep -qE '^Docs:[[:space:]]*none[[:space:]]*(—|-)[[:space:]]*[^[:space:]]'; then
+            echo "PR body declares 'Docs: none' with a reason - accepted."
+            exit 0
+          fi
+
+          echo "::error::Product code changed but no doc was updated and the PR body has no 'Docs: none — <reason>' line."
+          echo "Code changed:"; echo "$CODE"
+          echo "Either update the canonical doc (map: CLAUDE.md, 'La doc no miente' #7) or add to the PR body:"
+          echo "  Docs: none — <why no doc applies>"
+          exit 1
+
+  # ─── Server — typecheck + tests (Node 24: node:sqlite is stable) ──────────
+  server-typecheck:
+    name: Server TypeScript check
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_server == 'true'
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        run: npm ci
+      - name: TypeScript strict check
+        run: npx tsc --noEmit
+
+  server-test:
+    name: Server tests
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_server == 'true'
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+
+  # ─── Mobile — typecheck + tests ───────────────────────────────────────────
+  mobile-typecheck:
+    name: Mobile TypeScript check
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_mobile == 'true'
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install mobile dependencies
+        run: npm ci
+      - name: TypeScript strict check
+        run: npx tsc --noEmit
+
+  mobile-test:
+    name: Mobile tests
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_mobile == 'true'
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install mobile dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test -- --passWithNoTests
+
+  # ─── Desktop — typecheck + tests (Electron main/renderer, vitest) ─────────
+  # Golden rule #11: the desktop client MUST have a CI test suite covering IPC,
+  # ratchet serialization and DB encryption.
+  desktop-typecheck:
+    name: Desktop TypeScript check
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_desktop == 'true'
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        run: npm ci
+      - name: TypeScript strict check
+        run: npm run typecheck
+
+  desktop-test:
+    name: Desktop tests
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_desktop == 'true'
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
