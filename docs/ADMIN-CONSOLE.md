@@ -2,7 +2,7 @@
 
 > **Estado:** ✅ Diseño v1 (2026-09-19). **Doc canónico** de la consola, la auditoría y qué rol
 > puede hacer qué (mapa en `CLAUDE.md`). Referencia visual: `prototype/enterprise.jsx`
-> (`WorkDashboard`, seis pestañas). Se implementa en fase 4: completa en desktop, reducida en
+> (`WorkDashboard`, seis pestañas; Work añade Resumen y Facturación). Se implementa en fase 4: completa en desktop, reducida en
 > móvil, **misma lógica** (paridad).
 
 ## 1. Principio
@@ -23,6 +23,7 @@ requiere eso, no se construye (ADR-0002).
 | 4 | **Servidores y red** | Relay al que apunta la org, modo `multi`/`single`, versión mínima de cliente publicada, estado TURN, fingerprint TLS/onion si aplica | Cambiar `APP_MIN_VERSION`/`APP_LATEST_VERSION` (single-tenant), ver `relay/info` | solo lectura |
 | 5 | **Auditoría de eventos** | Tabla de `AuditEvent` (tipo, actor, target, hora al minuto, verificación de firma ✅/❌) con filtros por tipo/actor/rango | Exportar JSON (preferente) / CSV (escapado), verificar firma de un evento | ✅ lista + filtros; exportar solo desktop |
 | 6 | **Políticas de seguridad** | Política de org (con `limits` del owner), políticas por equipo y por sala, versión y firmante | Editar y firmar (respetando límites), ver diff entre versiones, ver qué salas se ven afectadas | ✅ ver; editar solo owner/admin en desktop (v1) |
+| 7 | **Facturación** (solo SaaS, solo owners) | Asientos usados/contratados, plan, próximos cobros | Pagar por Lightning, cambiar plan | solo lectura |
 
 ## 3. Matriz rol → acción
 
@@ -40,6 +41,8 @@ requiere eso, no se construye (ADR-0002).
 | Añadir/quitar miembros de una sala privada | moderador de la sala (owner/admin **solo si son miembros**) | | | ❌ |
 | Forzar rekey de sala | ✅ | ✅ | moderador de la sala | ❌ |
 | Ver auditoría / exportar | ✅ | ✅ | ❌ | ❌ |
+| Facturación (SaaS) | ✅ | ❌ | ❌ | ❌ |
+| Abandonar la organización | ✅ (si queda otro owner) | ✅ | ✅ | ✅ |
 | Leer contenido de una sala | **solo si es miembro**, como cualquier miembro | | | solo su sala |
 
 Regla estructural: **el rol de org nunca otorga acceso a contenido.** Un owner que quiera leer

@@ -38,6 +38,8 @@ repo, criptografía, relay y clientes propios. Comparte las reglas de trabajo y 
 | [`docs/DATA-MODEL.md`](docs/DATA-MODEL.md) | Entidades, claves, estados; esquema del relay |
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | Wire: enrolamiento, firmas de admin, salas, rekey, retención |
 | [`docs/ADMIN-CONSOLE.md`](docs/ADMIN-CONSOLE.md) | Pantallas de la consola y qué rol puede hacer qué |
+| [`docs/SCREENS.md`](docs/SCREENS.md) | Inventario de pantallas: heredadas, adaptadas, nuevas, descartadas |
+| [`docs/SECURITY-PARITY.md`](docs/SECURITY-PARITY.md) | Checklist: cada defensa del AegisLink personal y cómo la hereda Work |
 | [`docs/DESIGN-SYSTEM.md`](docs/DESIGN-SYSTEM.md) | Tema WORK (púrpura), tokens, componentes |
 | [`docs/DEPLOYMENT-MODES.md`](docs/DEPLOYMENT-MODES.md) | Multi-tenant vs single-tenant |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Fases, criterios de hecho y estado de las 17 secciones |

@@ -84,6 +84,10 @@ campo `from` en DMs.
    encolan sobres. Self-host reduce el "operador" al propio IT de la org.
 5. Análisis de tráfico a nivel de red (A5) sin Tor. Tor/onion se hereda del personal en una
    fase posterior.
+6. **Buzones ciegos**: a diferencia del personal (modo buzón ON por defecto, el relay nunca ve
+   el aegisId), el relay Work conoce aegisId ↔ org ↔ dispositivos ↔ salas. Es el precio de que
+   la org pueda administrar; está acotado en §4 y comparado fila a fila en
+   `SECURITY-PARITY.md` §3.
 
 ## 6. Verificación
 

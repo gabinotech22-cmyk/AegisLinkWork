@@ -52,7 +52,7 @@ sig = Ed25519.sign(msg, actorSigKey)
 
 ```
 Admin                        Relay                          Nuevo dispositivo
-  │ invite = sign({orgId, role, teamIds, roomIds?, orgFingerprint, nonce, exp})
+  │ invite = sign({orgId, orgFingerprint, relayUrl, relayPins?, role, teamIds, roomIds?, nonce, exp})
   │──(fuera de banda: QR / código / enlace)──────────────────────────▶│
   │                                                                   │ genera identidad + claves de dispositivo (on-device)
   │                             │◀── enroll { invite, identityPubKey, devicePubKey, deviceSigKey, proof } ──│
@@ -71,6 +71,12 @@ Admin                        Relay                          Nuevo dispositivo
 - El fingerprint del dispositivo se verifica **por el admin** antes de aprobar (presencial/QR o
   canal ya verificado). Sin aprobación, el dispositivo no recibe ninguna clave de sala.
 - `role: 'owner'` nunca se otorga por invitación; solo por ceremonia de org con la clave de org.
+- **Segundo dispositivo de un miembro**: el nuevo dispositivo se enlaza desde uno ya verificado
+  (QR con la clave pública del nuevo, firmado por el verificado — mismo mecanismo que el enlace
+  de dispositivos del personal) y entra como `Device(pending)`; el admin lo aprueba igual que en
+  el paso final. Sin aprobación no recibe claves de sala.
+- La invitación fija `relayUrl` (y `relayPins` para self-host): el cliente pinnea el TLS del relay
+  con esos SPKI antes del primer `enroll`.
 
 ## 5. Autenticación de socket
 
@@ -85,7 +91,7 @@ role}`. Un dispositivo `pending`/`revoked` o un certificado expirado → `auth:f
   (cierra H2). Cualquier sobre sin `ciphertext` y `nonce` de longitud válida es rechazado.
 - **DM**: sobre de dos capas del personal (Double Ratchet interior, `nacl.box` sellado exterior),
   sin `from` en el wire. Bootstrap por X3DH con el prekey bundle del dispositivo destino.
-- **Sala (`open`/`private`)**: cifrado con **SenderKey por miembro y época**, como
+- **Sala (`open`/`private`/`announcement`)**: cifrado con **SenderKey por miembro y época**, como
   `channelKey.ts` del personal:
   - `room:key_dist` — el emisor sella su SenderKey (`nacl.box`) para **cada dispositivo
     verificado** de cada miembro de la sala, tras validar el certificado de membresía y la
@@ -97,9 +103,12 @@ role}`. Un dispositivo `pending`/`revoked` o un certificado expirado → `auth:f
 - **Rekey** (`room:rekey`): lo dispara un miembro o el relay (por revocación/expulsión/política
   `maxKeyAgeDays`) y lo **ejecutan los miembros** generando nuevas SenderKeys para la nueva
   época y distribuyéndolas solo a los dispositivos vigentes. El relay no puede fabricar claves.
-- **Hilos, pins, reacciones, ediciones, borrado**: son mensajes de sala tipados dentro del
-  ciphertext (`type: 'thread_reply' | 'pin' | 'reaction' | 'edit' | 'delete'`), nunca campos en
-  claro. Un pin es un mensaje más; el relay no sabe qué está pineado.
+- **Hilos, pins, reacciones, ediciones, borrado, encuestas**: son mensajes de sala tipados dentro
+  del ciphertext (`type: 'thread_reply' | 'pin' | 'reaction' | 'edit' | 'delete' | 'poll' |
+  'poll_vote'`), nunca campos en claro. Un pin es un mensaje más; el relay no sabe qué está
+  pineado. El voto de encuesta es **anónimo E2EE** como en el personal (el relay no participa).
+- En salas `announcement` el cliente rechaza (y el relay no reenvía, por rol de sala) mensajes
+  de quien no es moderador.
 - **Mensajes de sistema** (alta/baja de miembro o dispositivo, rekey, cambio de política): los
   emite el cliente que ejecuta la acción (o el primero que la observa) como mensaje de sala
   cifrado que referencia el `eventId` de auditoría; así toda la sala ve el cambio y puede
@@ -138,7 +147,8 @@ role}`. Un dispositivo `pending`/`revoked` o un certificado expirado → `auth:f
 | `room:rekey` | C→R→C | `{ roomId, newEpoch, reason }` | reason ∈ revoke/remove/policy/manual |
 | `dm:msg` | C→R→C | `{ to, ciphertext, nonce, init? }` | idéntico al personal |
 | `ack` | C→R | `{ envelopeId }` | scoped al dispositivo autenticado |
-| `call:*` | ↔ | señalización **sellada** (SDP/ICE cifrados al destino) | regla de oro #4 |
+| `call:*` | ↔ | señalización **sellada** (SDP/ICE cifrados al destino); llamadas de sala en malla heredadas | regla de oro #4 |
+| `member:leave` | C→R | `{ signedAction }` | `member.left`; wipe local previo |
 
 HTTP se limita a: `/enroll`, `/prekeys/*`, `/blob/*` (subida/descarga con token), `/push/*`,
 `/relay/info`, `/health`. Ninguna de estas rutas devuelve ni acepta contenido de mensajes.

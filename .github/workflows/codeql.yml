@@ -38,7 +38,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Phase 0/1 of AegisLink Work has no product code yet (prototype/ is
+      # excluded by the config). CodeQL fails hard when it sees no source, so
+      # skip analysis until a package exists instead of teaching everyone to
+      # ignore a red X. Mirrors the `detect` job in ci.yml.
+      - id: code
+        name: Detect product code
+        run: |
+          if ls server/package.json mobile/package.json desktop/package.json >/dev/null 2>&1; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"; echo "Product code present."
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"; echo "No product code yet — skipping CodeQL."
+          fi
+
       - name: Initialize CodeQL
+        if: steps.code.outputs.has_code == 'true'
         uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
@@ -47,6 +61,7 @@ jobs:
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
+        if: steps.code.outputs.has_code == 'true'
         uses: github/codeql-action/analyze@v4
         with:
           category: '/language:javascript-typescript'

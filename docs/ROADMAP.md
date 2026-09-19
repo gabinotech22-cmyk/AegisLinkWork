@@ -30,13 +30,17 @@
 ### Fase 1 — Concepto y diseño en documentos ✅ HECHO (2026-09-19)
 - [x] `CONCEPT.md`, `THREAT-MODEL.md`, `DATA-MODEL.md`, `PROTOCOL.md`, `ADMIN-CONSOLE.md`,
       `DESIGN-SYSTEM.md`, `DEPLOYMENT-MODES.md`, ADR-0001/0002/0003.
-- [ ] Revisión del dueño de los 7 docs (abre issues por cada objeción; se cierran antes de la fase 2).
+- [x] Revisión de incongruencias del concepto contra las 53 pantallas y las defensas del personal
+      → 10 cambios aplicados (`CONCEPT.md` §10), `SCREENS.md` (inventario 🟢/🟡/🆕/⛔) y
+      `SECURITY-PARITY.md` (checklist de ~40 defensas por fase).
+- [ ] Revisión del dueño (abre issues por cada objeción; se cierran antes de la fase 2).
 
 ### Fase 2 — Semilla técnica 🔴 PENDIENTE
 Criterio de hecho: `tsc` y suites verdes en `server/`, `mobile/`, `desktop/` en CI; app arranca
 en emulador y desktop con tema WORK; ningún resto de features del personal que Work no usa.
 - [ ] Copiar del personal (SHA fijado en ADR-0001): `mobile/src/{crypto,db,socket,lock,security,notifications,theme,components,i18n,hooks,utils}`, `desktop/src/{main,preload,renderer/{socket,crypto,theme}}`, `server/src/{auth,crypto,pow,push,relay,db,http}` + tests.
-- [ ] Eliminar: canales públicos sellados, federación/relays múltiples, `web3/did` (queda pagos como stub), grupos con votación (sustituidos por salas), perfiles múltiples (v1: un perfil Work por app).
+- [ ] Eliminar solo lo que `SCREENS.md` marca ⛔: canales públicos sellados, `RelaySettings`/federación entre relays, `web3/did` (queda pagos como stub). Se **conservan** perfiles aislados (→ un perfil por org), encuestas anónimas, llamadas de grupo en malla, broadcast (→ anuncios).
+- [ ] `SECURITY-PARITY.md`: todas las filas 🟢 de fase 2 verdes en CI (mismos tests que el personal).
 - [ ] Tema WORK en ambos clientes; app id `com.aegislink.work`; iconos `icon-work`.
 - [ ] `DEVELOPMENT.md` y `TESTING.md` completados con comandos reales.
 - [ ] `.semgrep/` + regla nueva: ningún `SELECT` sin `org_id`.
@@ -54,14 +58,17 @@ aislamiento entre orgs; `THREAT-MODEL.md` §3 con test enlazado en T1, T2, T3, T
 Criterio: flujos 5.1-5.6 de `CONCEPT.md` funcionando end-to-end en ambos clientes contra el
 relay de la fase 3; consola con las 7 pestañas en desktop y su versión móvil; estados vacíos y
 errores de `ADMIN-CONSOLE.md` §6; paridad crypto verificada por tests en ambos.
-- [ ] Enrolamiento, Work Privacy, directorio, salas abiertas, sala/info/dispositivos.
+- [ ] Pantallas 🆕 y 🟡 de `SCREENS.md` §1-§4: Welcome/Enroll/PendingApproval/OrgCreate, OrgSwitcher, Devices con enlace + aprobación, Work Privacy (abandonar org), Directory/MemberDetail, Rooms/Room/RoomInfo/RoomCreate/RoomDiscover, Thread, Announcements, DeviceRevoked, PolicyUnsupported.
+- [ ] Políticas nuevas gateando UI: viewOnce, locationSharing, notificationPreviews, allowBackup, allowExport, requireAppLock, blockScreenCapture, warnOnCompromisedRuntime.
+- [ ] `RoomCall` (malla heredada, ≤ 6).
 - [ ] Salas: hilos, pins, reacciones, adjuntos, programados, efímeros, búsqueda local E2EE.
 - [ ] DMs (Double Ratchet + sealed-sender), mensajes de sistema.
 - [ ] Consola admin completa (desktop) y reducida (móvil). Políticas aplicadas en cliente.
 - [ ] Maestro E2E de enrolamiento; `permissions-audit`; fuzz de parsers de invitación.
 
 ### Fase 5 — Completar producto 🔴 PENDIENTE
-- [ ] Llamadas 1:1 E2EE (señalización sellada, TURN).
+- [ ] Llamadas 1:1 E2EE (señalización sellada, TURN) — heredadas; verificación de paridad.
+- [ ] `AdminBilling` (SaaS, owners).
 - [ ] Backup cifrado del perfil Work; backup de clave de org (owner).
 - [ ] Pagos por asiento (Lightning; decisión fiat).
 - [ ] Reuniones de sala multi-parte: diseño aparte (`MEETINGS-DESIGN.md`) antes de código.
@@ -70,7 +77,7 @@ errores de `ADMIN-CONSOLE.md` §6; paridad crypto verificada por tests en ambos.
 - [ ] `infra/selfhost/` single-tenant + `SELF-HOSTING.md`; migración SaaS↔self-host.
 - [ ] EAS/stores (`com.aegislink.work`), build desktop, reproducible-build, deploy manual.
 - [ ] Legal Work definitivo (`privacy-policy.md`, `terms-of-service.md`).
-- [ ] Auditoría interna `qa-lead` de `THREAT-MODEL.md` contra código → `docs/AUDIT-<fecha>.md`.
+- [ ] Auditoría interna `qa-lead` de `THREAT-MODEL.md` y `SECURITY-PARITY.md` contra código → `docs/AUDIT-<fecha>.md`.
 - [ ] Beta cerrada con 2-3 organizaciones.
 
 ## Estado de las 17 secciones
@@ -82,16 +89,16 @@ errores de `ADMIN-CONSOLE.md` §6; paridad crypto verificada por tests en ambos.
 | 3 | Organizaciones, equipos y roles | 📐 diseñado | `DATA-MODEL.md`, `ADMIN-CONSOLE.md` §3 |
 | 4 | Salas abiertas/privadas con SenderKey sellada | 📐 diseñado | `PROTOCOL.md` §6 |
 | 5 | DMs Double Ratchet + sealed-sender | 📐 heredado | ADR-0001 |
-| 6 | Hilos, pins, reacciones, búsqueda E2EE local | 📐 diseñado | `PROTOCOL.md` §6, `DATA-MODEL.md` §5 |
+| 6 | Hilos, pins, reacciones, encuestas anónimas, anuncios, búsqueda E2EE local | 📐 diseñado | `PROTOCOL.md` §6, `DATA-MODEL.md` §5, `SCREENS.md` §2 |
 | 7 | Adjuntos cifrados y archivos de sala | 📐 heredado | `PROTOCOL.md` §10 |
 | 8 | Retención y efímeros por política | 📐 diseñado | `PROTOCOL.md` §7 |
 | 9 | Mensajes programados | 📐 heredado | — |
 | 10 | Políticas de seguridad de la org | 📐 diseñado | `DATA-MODEL.md` (Policy), `PROTOCOL.md` §8 |
 | 11 | Consola admin y auditoría firmada | 📐 diseñado | `ADMIN-CONSOLE.md` |
 | 12 | Llamadas 1:1 E2EE | 📐 heredado | `PROTOCOL.md` §10 |
-| 13 | Reuniones de sala multi-parte | ⏳ fase 5, diseño pendiente | — |
+| 13 | Reuniones de sala: malla heredada (≤ 6) en fase 4; SFU E2EE en fase 5 | 📐 parcial | `SCREENS.md` §3 |
 | 14 | Pánico y app-lock | 📐 heredado | — |
-| 15 | Backup cifrado del perfil Work | 📐 diseñado | `DATA-MODEL.md` §2 |
+| 15 | Backup cifrado del perfil Work + backup de clave de org | 📐 diseñado | `DATA-MODEL.md` §2, `SECURITY-PARITY.md` §1 |
 | 16 | Multi-tenant + self-host | 📐 diseñado | `DEPLOYMENT-MODES.md` |
 | 17 | Pagos por asiento | ⏳ fase 5 | — |
 

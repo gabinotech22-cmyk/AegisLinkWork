@@ -58,7 +58,7 @@ Organization 1──* Team 1──* Member 1──* Device
 |---|---|---|
 | `roomId` | random 16 B | |
 | `orgId` | | |
-| `kind` | `open` \| `private` \| `dm` | `dm` no tiene metadata de sala más allá de los dos miembros |
+| `kind` | `open` \| `private` \| `announcement` \| `dm` | `announcement`: solo moderadores publican. `dm` no tiene metadata de sala más allá de los dos miembros |
 | `meta` | blob cifrado con la clave de sala | nombre, descripción, tema, emoji |
 | `retentionDays` | `number \| null` | Copia **firmada** de la política efectiva (para que el relay calcule TTL) |
 | `createdBy` | `aegisId` | |
@@ -87,6 +87,12 @@ type Policy = {
     guestsAllowed?: boolean;
     externalDmAllowed?: boolean;
     scheduledMessages?: boolean;
+    viewOnce?: boolean;
+    locationSharing?: boolean;
+    notificationPreviews?: boolean;    // false = sin vista previa en pantalla de bloqueo
+    allowBackup?: boolean;
+    allowExport?: boolean;             // exportación de contenido de salas
+    warnOnCompromisedRuntime?: boolean; // aviso local (root/hooking); nunca bloqueo ni reporte
   };
   limits?: Policy['rules'];      // solo en scope org, puesto por el owner: techo para admins
   issuedBy: string; nonce: string; exp: number; signature: string;
@@ -100,6 +106,7 @@ puede ser **más restrictivo**. El cliente valida la cadena completa antes de ap
 |---|---|
 | `inviteId` = `nonce` | Consumido al enrolar |
 | `orgId`, `role` (nunca `owner`), `teamIds`, `roomIds?` (guests) | |
+| `relayUrl`, `relayPins?` | Relay al que debe conectarse el miembro (SaaS o propio) y pines SPKI SHA-256 de su TLS si es self-hosted. El miembro nunca elige relay |
 | `exp` | ≤ 7 días |
 | `issuedBy`, `signature` | Admin certificado |
 | `orgFingerprint` | Para que el invitado lo compare fuera de banda |
@@ -109,7 +116,7 @@ Tabla **cerrada** de eventos (T9 en `THREAT-MODEL.md`): `org.created`, `org.key_
 `policy.updated`, `invite.created`, `invite.revoked`, `member.enrolled`, `member.approved`,
 `member.role_changed`, `member.suspended`, `member.removed`, `device.approved`,
 `device.revoked`, `room.created`, `room.archived`, `room.member_added`, `room.member_removed`,
-`room.rekeyed`, `audit.exported`. **Ningún evento de mensajería.**
+`room.rekeyed`, `member.left`, `audit.exported`. **Ningún evento de mensajería.**
 
 | Campo | Notas |
 |---|---|
