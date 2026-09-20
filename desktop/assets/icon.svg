@@ -1,24 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
   <defs>
     <radialGradient id="bg" cx="30%" cy="20%" r="140%">
-      <stop offset="0%" stop-color="#1a2326"/>
-      <stop offset="70%" stop-color="#06090a"/>
+      <stop offset="0%" stop-color="#1a1530"/>
+      <stop offset="70%" stop-color="#0b0a12"/>
     </radialGradient>
-    <radialGradient id="glare" cx="100%" cy="100%" r="80%">
-      <stop offset="0%" stop-color="rgba(91,242,185,0.18)"/>
-      <stop offset="60%" stop-color="transparent"/>
-    </radialGradient>
-    <radialGradient id="glare2" cx="0%" cy="0%" r="40%">
-      <stop offset="0%" stop-color="rgba(255,255,255,0.06)"/>
-      <stop offset="70%" stop-color="transparent"/>
+    <radialGradient id="glow" cx="100%" cy="100%" r="80%">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#8b5cf6" stop-opacity="0"/>
     </radialGradient>
   </defs>
-  <rect width="1024" height="1024" fill="url(#bg)"/>
-  <rect width="1024" height="1024" fill="url(#glare)"/>
-  <rect width="1024" height="1024" fill="url(#glare2)"/>
-  <g transform="translate(225.28, 225.28) scale(14.336)">
-    <path d="M20 2 L35 10 L35 30 L20 38 L5 30 L5 10 Z" stroke="#5bf2b9" stroke-width="2.4" fill="none" stroke-linejoin="round"/>
-    <rect x="13" y="15" width="14" height="3.2" rx="0.4" fill="#5bf2b9"/>
-    <rect x="13" y="21.8" width="14" height="3.2" rx="0.4" fill="#5bf2b9" opacity="0.55"/>
-  </g>
+  <rect width="100" height="100" fill="url(#bg)"/>
+  <rect width="100" height="100" fill="url(#glow)"/>
+  <path d="M50 6 L86 25 L86 75 L50 94 L14 75 L14 25 Z"
+        stroke="#8b5cf6" stroke-width="5.5" fill="none" stroke-linejoin="round"/>
+  <rect x="32" y="38" width="36" height="8" rx="1" fill="#8b5cf6"/>
+  <rect x="32" y="54" width="36" height="8" rx="1" fill="#8b5cf6" opacity="0.55"/>
 </svg>

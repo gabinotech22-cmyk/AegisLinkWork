@@ -43,21 +43,44 @@ for (const variant of VARIANTS) {
   }
 }
 
-// Also generate the adaptive icon foreground (transparent bg, mark only)
-const adaptiveSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
-  <path d="M50 6 L86 25 L86 75 L50 94 L14 75 L14 25 Z"
-        stroke="#5bf2b9" stroke-width="5.5" fill="none" stroke-linejoin="round"/>
-  <rect x="32" y="38" width="36" height="8" rx="1" fill="#5bf2b9"/>
-  <rect x="32" y="54" width="36" height="8" rx="1" fill="#5bf2b9" opacity="0.55"/>
-</svg>`;
+// AegisLink Work: the mark colour is the WORK accent (docs/DESIGN-SYSTEM.md).
+const WORK_ACCENT = '#8b5cf6';
 
-try {
-  const resvg = new Resvg(adaptiveSvg, { fitTo: { mode: 'width', value: 1024 } });
-  const png = resvg.render().asPng();
-  writeFileSync(join(assetsDir, 'adaptive-icon.png'), png);
-  console.log('✓  adaptive-icon.png  (1024x1024, transparent bg)');
-} catch (e) {
-  console.error(`✗  adaptive-icon.png — ${e.message}`);
+/** The AegisMark alone on a transparent canvas, in the given colour. */
+function markSvg(color) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
+  <path d="M50 6 L86 25 L86 75 L50 94 L14 75 L14 25 Z"
+        stroke="${color}" stroke-width="5.5" fill="none" stroke-linejoin="round"/>
+  <rect x="32" y="38" width="36" height="8" rx="1" fill="${color}"/>
+  <rect x="32" y="54" width="36" height="8" rx="1" fill="${color}" opacity="0.55"/>
+</svg>`;
 }
 
-console.log('\nDone. Run `eas build` to pick up the new icons.');
+function renderStringToPng(svg, size) {
+  const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: size }, font: { loadSystemFonts: false } });
+  return resvg.render().asPng();
+}
+
+const derived = [
+  // Main store/app icon = the dark variant.
+  ['icon.png',              () => renderSvgToPng(join(iconsDir, 'icon-dark.svg'), MAIN_SIZE)],
+  // Android adaptive foreground: mark only, transparent (background colour lives in app.json).
+  ['adaptive-icon.png',     () => renderStringToPng(markSvg(WORK_ACCENT), 1024)],
+  // Splash: mark only on transparent; app.json paints the background (#0b0a12).
+  ['splash-icon.png',       () => renderStringToPng(markSvg(WORK_ACCENT), 400)],
+  ['favicon.png',           () => renderSvgToPng(join(iconsDir, 'icon-dark.svg'), 48)],
+  // Android notification icon: white silhouette on transparent, 96×96 (xxxhdpi);
+  // the system tints it with android.notification.color.
+  ['notification-icon.png', () => renderStringToPng(markSvg('#ffffff'), 96)],
+];
+
+for (const [name, render] of derived) {
+  try {
+    writeFileSync(join(assetsDir, name), render());
+    console.log(`✓  ${name}`);
+  } catch (e) {
+    console.error(`✗  ${name} — ${e.message}`);
+  }
+}
+
+console.log('\nDone. Then run `node scripts/gen-icons.js` for the Android mipmaps and `eas build`.');

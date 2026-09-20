@@ -61,8 +61,9 @@ en emulador y desktop con tema WORK; ningún resto de features del personal que 
       `server-test`, `mobile-test`, `desktop-test`).
 - [x] Tema WORK en ambos clientes (`theme/vault.ts`: `#8b5cf6`/`#6d28d9`); app id
       `com.aegislink.work`, slug `aegislink-work`, scheme `aegislinkwork`; paquetes
-      `aegislink-work-{mobile,desktop,server}`. Iconos `icon-work`: pendiente de diseño (fase 4,
-      junto con las pantallas nuevas; los actuales son los del personal).
+      `aegislink-work-{mobile,desktop,server}`. Iconos Work en ambos clientes (AegisMark púrpura;
+      `mobile/assets/icons/README.md`, `DESIGN-SYSTEM.md` §5): principal, alternativos claro/tinted,
+      adaptive + mipmaps Android, splash, favicon, icono de notificación, `.ico` de desktop.
 - [x] `DEVELOPMENT.md` y `TESTING.md` con comandos reales.
 - [ ] ~~`.semgrep/` regla "ningún `SELECT` sin `org_id`"~~ → **movida a la fase 3**: hoy no
       existe ninguna tabla con `org_id`, así que la regla fallaría en todo el relay heredado o

@@ -16,8 +16,8 @@ const fs = require('fs');
 const path = require('path');
 
 const VARIANTS = [
-  { name: 'dark',    src: './assets/icon-dark.png',    bg: '#06090a' },
-  { name: 'light',   src: './assets/icon-light.png',   bg: '#efece4' },
+  { name: 'dark',    src: './assets/icon-dark.png',    bg: '#0b0a12' },
+  { name: 'light',   src: './assets/icon-light.png',   bg: '#f4f2f9' },
   { name: 'tinted',  src: './assets/icon-tinted.png',  bg: '#14161c' },
 ];
 

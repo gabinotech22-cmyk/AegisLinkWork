@@ -9,8 +9,8 @@ import { I } from '../components/icons';
 import { themedAlert } from '../components/AlertHost';
 
 const ALL_VARIANTS = [
-  { id: 'default', bg: '#06090a', mark: '#8b5cf6' },
-  { id: 'light',   bg: '#efece4', mark: '#6d28d9' },
+  { id: 'default', bg: '#0b0a12', mark: '#8b5cf6' },
+  { id: 'light',   bg: '#f4f2f9', mark: '#6d28d9' },
   { id: 'tinted',  bg: '#14161c', mark: '#bdbdbd' },
 ] as const;
 

@@ -1,5 +1,5 @@
 /**
- * Generates assets/icon.ico and assets/icon.png from the AegisMark SVG.
+ * Generates assets/icon.ico and assets/icon.png from assets/icon.svg (AegisMark, WORK purple).
  * Run once before `npm run make`.
  *
  * Usage:  node scripts/gen-icon.mjs
@@ -13,24 +13,11 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS    = path.resolve(__dirname, '..', 'assets');
 
-// ── AegisMark SVG (accent = #5bf2b9, transparent background) ─────────────────
+// ── Source: assets/icon.svg ──────────────────────────────────────────────────
+// The same file as mobile/assets/icons/icon-dark.svg (AegisMark, WORK purple —
+// docs/DESIGN-SYSTEM.md). Keep the two in sync; this script only rasterizes.
 
-const ACCENT = '#5bf2b9';
-
-function makeIconSVG(size) {
-  // viewBox 40×40 → scaled to `size`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 40 40" fill="none">
-  <!-- background pill -->
-  <rect width="40" height="40" rx="10" fill="#07090a"/>
-  <!-- shield outline -->
-  <path d="M20 3 L36 11 L36 29 L20 37 L4 29 L4 11 Z"
-        stroke="${ACCENT}" stroke-width="2.4" stroke-linejoin="round"/>
-  <!-- top bar -->
-  <rect x="13" y="15" width="14" height="3.2" rx="0.4" fill="${ACCENT}"/>
-  <!-- bottom bar (dimmed) -->
-  <rect x="13" y="21.8" width="14" height="3.2" rx="0.4" fill="${ACCENT}" opacity="0.55"/>
-</svg>`;
-}
+const SRC_SVG = fs.readFileSync(path.join(ASSETS, 'icon.svg'), 'utf8');
 
 // ── Try to use @resvg/resvg-js if installed ──────────────────────────────────
 
@@ -44,20 +31,16 @@ async function tryResvg(sizes) {
 
   const pngs = {};
   for (const s of sizes) {
-    const svg = makeIconSVG(s);
-    const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: s } });
+    const resvg = new Resvg(SRC_SVG, { fitTo: { mode: 'width', value: s }, font: { loadSystemFonts: false } });
     pngs[s] = resvg.render().asPng();
   }
   return pngs;
 }
 
-// ── Fallback: write SVG and instruct user ─────────────────────────────────────
+// ── Fallback: instruct user ───────────────────────────────────────────────────
 
 function writeSVGFallback() {
-  const svgPath = path.join(ASSETS, 'icon.svg');
-  fs.writeFileSync(svgPath, makeIconSVG(256));
-  console.log('\n✓ Wrote assets/icon.svg');
-  console.log('\nTo convert to ICO, run ONE of:');
+  console.log('\nassets/icon.svg is the source. To convert to ICO, run ONE of:');
   console.log('  npx svgexport assets/icon.svg assets/icon.png 1024:1024');
   console.log('  # then use https://convertico.com to get icon.ico\n');
   console.log('OR install the rasterizer and re-run:');
@@ -98,7 +81,7 @@ function buildIco(pngBuffers) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-const SIZES = [16, 32, 48, 64, 128, 256];
+const SIZES = [16, 32, 48, 64, 128, 256, 1024];
 
 const pngs = await tryResvg(SIZES);
 
@@ -109,14 +92,14 @@ if (!pngs) {
 
 // Save 1024 png for macOS icns / general use
 const png1024Path = path.join(ASSETS, 'icon.png');
-// Use 256 as the "large" png since resvg was called with those sizes
-fs.writeFileSync(png1024Path, pngs[256]);
-console.log('✓ Wrote assets/icon.png  (256×256)');
+fs.writeFileSync(png1024Path, pngs[1024]);
+console.log('✓ Wrote assets/icon.png  (1024×1024)');
 
-// Build ICO with all sizes
-const icoBuffers = SIZES.map(s => ({ size: s, data: Buffer.from(pngs[s]) }));
+// Build ICO with all sizes up to 256 (ICO's maximum).
+const ICO_SIZES = SIZES.filter(s => s <= 256);
+const icoBuffers = ICO_SIZES.map(s => ({ size: s, data: Buffer.from(pngs[s]) }));
 const ico = buildIco(icoBuffers);
 const icoPath = path.join(ASSETS, 'icon.ico');
 fs.writeFileSync(icoPath, ico);
-console.log(`✓ Wrote assets/icon.ico  (${SIZES.join(', ')} px)\n`);
+console.log(`✓ Wrote assets/icon.ico  (${ICO_SIZES.join(', ')} px)\n`);
 console.log('Ready — run `npm run make` to build the installer.');

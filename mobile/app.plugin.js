@@ -26,8 +26,8 @@ const fs = require('fs');
 const path = require('path');
 
 const VARIANTS = [
-  { name: 'dark',   bg: '#06090a' },
-  { name: 'light',  bg: '#efece4' },
+  { name: 'dark',   bg: '#0b0a12' },
+  { name: 'light',  bg: '#f4f2f9' },
   { name: 'tinted', bg: '#14161c' },
 ];
 
