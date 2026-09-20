@@ -90,11 +90,6 @@ jest.mock('../../crypto/fingerprint', () => ({
   fingerprintHex: jest.fn(() => ['aaaa', 'bbbb', 'cccc', 'dddd', 'eeee', 'ffff', '1111', '2222']),
 }));
 
-// ── DIDManager — avoid touching secure-store/native deps ────────────────────
-jest.mock('../../web3/did/DIDManager', () => ({
-  getOrCreateDID: jest.fn().mockResolvedValue({ did: 'did:aegis:mock', profileId: 'mock', derivedAt: 0 }),
-}));
-
 // ── registration + x3dh — registration is invoked by handleEnter; mock so it
 //    resolves instantly without any network/crypto work. ───────────────────
 jest.mock('../../crypto/registration', () => ({

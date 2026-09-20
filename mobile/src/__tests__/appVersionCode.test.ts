@@ -44,9 +44,10 @@ describe('android versionCode', () => {
   });
 
   it('is greater than every versionCode already published from this repo', () => {
-    // v1.0.5's APK on GitHub carries versionCode 2. Anything we publish next has
-    // to exceed it or installs stop being offered as updates.
-    const HIGHEST_PUBLISHED = 2;
+    // AegisLink Work has published nothing yet (the personal edition's codes
+    // belong to a different app id). Raise this to the code of every APK we
+    // publish so a later hand-edit can never go backwards.
+    const HIGHEST_PUBLISHED = 0;
     expect(versionCode).toBeGreaterThan(HIGHEST_PUBLISHED);
   });
 

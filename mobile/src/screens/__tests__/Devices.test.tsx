@@ -66,11 +66,6 @@ jest.mock('../../utils/secureStore', () => ({
   ss: { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue(undefined) },
 }));
 
-// ── web3 revocation (best-effort) ───────────────────────────────────────────
-jest.mock('../../web3/deviceRevocation/RevokeDevice', () => ({
-  buildRevocationPayload: jest.fn().mockResolvedValue({ did: 'did:aegis:x' }),
-}));
-
 jest.mock('../../config', () => ({ SERVER_URL: 'http://relay.test' }));
 
 // ── socket ──────────────────────────────────────────────────────────────────

@@ -42,7 +42,7 @@
     },
     "android": {
       "package": "com.aegislink.work",
-      "versionCode": 1,
+      "versionCode": 100,
       "intentFilters": [
         {
           "action": "VIEW",
