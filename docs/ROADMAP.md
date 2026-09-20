@@ -65,6 +65,8 @@ en emulador y desktop con tema WORK; ningún resto de features del personal que 
       `mobile/assets/icons/README.md`, `DESIGN-SYSTEM.md` §5): principal, alternativos claro/tinted,
       adaptive + mipmaps Android, splash, favicon, icono de notificación, `.ico` de desktop.
 - [x] `DEVELOPMENT.md` y `TESTING.md` con comandos reales.
+- [ ] Triage de las 15 alertas de code-scanning heredadas (también abiertas en el personal) — issue #4;
+      no bloquean el merge (`main` sin protección de rama) pero dejan "CodeQL"/"Semgrep OSS" en rojo.
 - [ ] ~~`.semgrep/` regla "ningún `SELECT` sin `org_id`"~~ → **movida a la fase 3**: hoy no
       existe ninguna tabla con `org_id`, así que la regla fallaría en todo el relay heredado o
       habría que silenciarla entera. Entra en la misma PR que cree los repos con `orgId`.
