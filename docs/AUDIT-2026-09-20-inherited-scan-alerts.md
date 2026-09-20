@@ -1,6 +1,6 @@
 # Auditoría 2026-09-20 — alertas de code-scanning heredadas con la semilla
 
-> **Estado:** ✅ cerrada (PR #5, issue #4). Doc histórico: registra el triage de las 16 alertas de
+> **Estado:** ✅ cerrada (PR #6, issue #4). Doc histórico: registra el triage de las 16 alertas de
 > GitHub code scanning que llegaron con la semilla técnica (PR #3). El estado actual de las
 > alertas vive en la pestaña *Security → Code scanning* del repo; las reglas y su tubería en
 > `docs/TESTING.md`.
