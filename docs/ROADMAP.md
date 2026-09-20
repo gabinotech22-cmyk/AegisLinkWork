@@ -56,6 +56,10 @@ en emulador y desktop con tema WORK; ningún resto de features del personal que 
         `lightning_invoices` como stub de pagos (sección 17).
       - Certificado OTA de firma del personal (`mobile/certs/`) y `mobile/.github/` (workflow
         anidado, GitHub no lo ejecuta): Work genera su propio par de firma en la fase 6.
+      - pin-set SPKI del relay personal en `app.plugin.js`/`app.json`: fuera. Work no tiene relay fijo en
+        build; el pin viaja en la invitación (`relayPins`, fase 4; `SECURITY-PARITY.md`) y el host SaaS
+        se pinnea en la fase 6. Test `audit-regression.test.ts` M-2 reescrito: ningún manifiesto
+        apunta al relay personal y cleartext sigue prohibido.
       Se **conservan** perfiles aislados, encuestas anónimas, llamadas de grupo en malla, broadcast.
 - [x] `SECURITY-PARITY.md`: las filas 🟢 entran con sus tests tal cual (suites del personal en CI:
       `server-test`, `mobile-test`, `desktop-test`).

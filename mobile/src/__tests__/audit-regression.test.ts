@@ -214,68 +214,46 @@ describe('Duress unlock never reveals panic/settings screens (source regression)
   });
 });
 
-describe('M-2 — certificate pinning manifest entries exist', () => {
-  // `android/` is `expo prebuild` output and is gitignored (managed workflow),
-  // so it is absent in CI where no prebuild runs. Guard the native-file
-  // assertions behind its presence: they still verify the generated pin-set on
-  // a prebuilt checkout, while CI relies on the iOS app.json check below (the
-  // committed source of truth for the pinned domain). Without this guard the
-  // suite hard-fails on every CI run (fs.existsSync → false).
-  const ANDROID_DIR = path.resolve(SRC, '..', 'android');
-  const hasAndroidPrebuild = fs.existsSync(ANDROID_DIR);
-  const itAndroid = hasAndroidPrebuild ? it : it.skip;
+describe('M-2 — transport hardening (AegisLink Work seed)', () => {
+  // The personal edition pins its relay host at build time. A Work client has
+  // no fixed relay at build time: the organization's invitation carries
+  // `relayUrl` + `relayPins` and the client pins at enrolment (fase 4,
+  // docs/PROTOCOL.md §4, docs/SECURITY-PARITY.md). What must hold in the seed:
+  //   (a) NOTHING points a Work build at the personal relay — no personal
+  //       domain, no personal SPKI pins, in either platform's manifest;
+  //   (b) cleartext stays forbidden by default on Android.
+  const PERSONAL_RELAY_HOST = 'aegislink.duckdns.org';
+  const PERSONAL_SPKI_PINS = [
+    's/tdAOmUzd8syaTuqfgGvFcn6DzA5Cmb+Vby1ST+U3Y=', // LE YE2 intermediate
+    'ikzWA3NEA1YVdzZPkMmfU1/noMRdEdVGyxCkuSNpihA=', // personal leaf
+    'LvglXAxgB9K5SCOZrLvdX0VVc8UuEU+Bj6r58LSA7r8=', // personal offline backup key
+    'sCkq5UWXjg+7mKu9lMhhYF5bGLsy7VI/UNW3tccdR7w=', // ISRG Root YE anchor
+  ];
+  const appJson = fs.readFileSync(path.resolve(SRC, '..', 'app.json'), 'utf8');
+  const plugin = fs.readFileSync(path.resolve(SRC, '..', 'app.plugin.js'), 'utf8');
 
-  itAndroid('Android network_security_config.xml exists with a pin-set', () => {
-    const nsc = path.resolve(ANDROID_DIR, 'app', 'src', 'main', 'res', 'xml', 'network_security_config.xml');
-    expect(fs.existsSync(nsc)).toBe(true);
-    const src = fs.readFileSync(nsc, 'utf8');
-    expect(src).toMatch(/<pin-set/);
-    expect(src).toMatch(/aegislink\.duckdns\.org/);
+  it('no manifest references the personal relay host', () => {
+    expect(appJson).not.toContain(PERSONAL_RELAY_HOST);
+    // The plugin may name the host in prose; it must not appear in the XML it emits.
+    const xml = plugin.match(/const NETWORK_SECURITY_XML = `([\s\S]*?)`;/)?.[1] ?? '';
+    expect(xml.length).toBeGreaterThan(0);
+    expect(xml).not.toContain(PERSONAL_RELAY_HOST);
   });
 
-  itAndroid('AndroidManifest.xml references the network security config', () => {
-    const manifest = path.resolve(ANDROID_DIR, 'app', 'src', 'main', 'AndroidManifest.xml');
-    const src = fs.readFileSync(manifest, 'utf8');
-    expect(src).toMatch(/networkSecurityConfig="@xml\/network_security_config"/);
+  it('no manifest carries the personal SPKI pins (iOS NSPinnedDomains or Android pin-set)', () => {
+    for (const pin of PERSONAL_SPKI_PINS) {
+      expect(appJson).not.toContain(pin);
+      expect(plugin).not.toContain(pin);
+    }
+    expect(appJson).not.toMatch(/NSPinnedDomains/);
+    expect(plugin).not.toMatch(/<pin-set/);
   });
 
-  it('iOS app.json declares NSPinnedDomains for the relay', () => {
-    const appJson = path.resolve(SRC, '..', 'app.json');
-    const src = fs.readFileSync(appJson, 'utf8');
-    expect(src).toMatch(/NSPinnedDomains/);
-    expect(src).toMatch(/aegislink\.duckdns\.org/);
-  });
-
-  // Both platforms must pin the SAME keys, in the same order. iOS enforces ATS
-  // at the OS level with no app-code override, so a pin present on Android but
-  // missing on iOS shows up only as "Network request failed" on a shipped
-  // build — exactly the drift that broke the first iOS TestFlight build.
-  it('iOS (app.json) and Android (app.plugin.js) pin the identical key set', () => {
-    const appJson = JSON.parse(fs.readFileSync(path.resolve(SRC, '..', 'app.json'), 'utf8'));
-    const iosPins: string[] = appJson.expo.ios.infoPlist.NSAppTransportSecurity
-      .NSPinnedDomains['aegislink.duckdns.org'].NSPinnedCAIdentities
-      .map((e: Record<string, string>) => e['SPKI-SHA256-BASE64']);
-
-    const plugin = fs.readFileSync(path.resolve(SRC, '..', 'app.plugin.js'), 'utf8');
-    const consts = new Map(
-      [...plugin.matchAll(/const (SPKI_\w+)\s*=\s*'([^']+)'/g)].map((m) => [m[1], m[2]]),
-    );
-    const pinSet = plugin.match(/<pin-set[\s\S]*?<\/pin-set>/)?.[0] ?? '';
-    const androidPins = [...pinSet.matchAll(/\$\{(SPKI_\w+)\}/g)].map((m) => consts.get(m[1]));
-
-    expect(androidPins.length).toBeGreaterThanOrEqual(3);
-    expect(iosPins).toEqual(androidPins);
-  });
-
-  // Two Let's Encrypt intermediate rotations (E8→YE1, YE1→YE2) each invalidated
-  // the leaf AND intermediate pins at once, bricking every shipped build with no
-  // server-side fix available. The long-lived ISRG Root YE anchor is what turns
-  // the next rotation into a non-event; removing it re-arms that outage.
-  it('keeps the long-lived ISRG Root YE anchor pin on both platforms', () => {
-    const ISRG_ROOT_YE = 'sCkq5UWXjg+7mKu9lMhhYF5bGLsy7VI/UNW3tccdR7w=';
-    const appJson = fs.readFileSync(path.resolve(SRC, '..', 'app.json'), 'utf8');
-    const plugin = fs.readFileSync(path.resolve(SRC, '..', 'app.plugin.js'), 'utf8');
-    expect(appJson).toContain(ISRG_ROOT_YE);
-    expect(plugin).toContain(ISRG_ROOT_YE);
+  it('Android base-config forbids cleartext (only dev loopback and .onion opt in)', () => {
+    const xml = plugin.match(/const NETWORK_SECURITY_XML = `([\s\S]*?)`;/)?.[1] ?? '';
+    expect(xml).toMatch(/<base-config cleartextTrafficPermitted="false">/);
+    const optIns = [...xml.matchAll(/<domain-config cleartextTrafficPermitted="true">([\s\S]*?)<\/domain-config>/g)]
+      .flatMap((m) => [...m[1].matchAll(/<domain[^>]*>([^<]+)<\/domain>/g)].map((d) => d[1]));
+    expect(optIns.sort()).toEqual(['10.0.2.2', '127.0.0.1', 'localhost', 'onion']);
   });
 });

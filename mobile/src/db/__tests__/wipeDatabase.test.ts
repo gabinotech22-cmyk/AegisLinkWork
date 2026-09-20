@@ -239,14 +239,11 @@ describe('wipeDatabase — factory reset (device-global remnants, 2026-07-19 reg
     expect(deletedKeys).toContain('aegis.deliveryToken.peer.PEER-B');
   });
 
-  it('purges per-group sender-key indexes and the public-channel indexes', async () => {
+  it('purges per-group sender-key indexes', async () => {
     const { ssDeleted } = await runWipe({ groupIds: ['GRP-1'] });
-    // channelKeyStore: the per-channel index (its listed sender keys go with
+    // channelKeyStore: the per-group index (its listed sender keys go with
     // it — empty in this mock, the index delete proves the walk ran).
     expect(ssDeleted).toContain('aegis.channelKeyIndex.v1.GRP-1');
-    // publicChannelStore.deleteAllChannels: both of its own indexes.
-    expect(ssDeleted).toContain('aegis.pubchannel.index.v1');
-    expect(ssDeleted).toContain('aegis.pubchannel.applyindex.v1');
   });
 
   it('deletes the on-disk media and avatar directories', async () => {
