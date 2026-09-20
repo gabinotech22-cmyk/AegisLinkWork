@@ -1,0 +1,91 @@
+{
+  "cli": {
+    "version": ">= 13.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "channel": "development",
+      "android": {
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": true
+      },
+      "env": {
+        "EXPO_PUBLIC_RELAY_URL": "http://localhost:3001",
+        "EXPO_PUBLIC_TURN_URL": "turn:localhost:3478",
+        "AEGIS_EXPO_GO": "0"
+      }
+    },
+    "preview": {
+      "developmentClient": false,
+      "distribution": "internal",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": false
+      },
+      "env": {
+        "APP_ENV": "preview",
+        "EXPO_PUBLIC_SERVER_URL": "https://aegislink.duckdns.org",
+        "EXPO_PUBLIC_RELAY_URL": "https://aegislink.duckdns.org",
+        "EXPO_PUBLIC_TURN_URL": "turn:aegislink-turn.duckdns.org:3478",
+        "AEGIS_EXPO_GO": "0",
+        "EXPO_PUBLIC_ONION_URL": "http://fhxnal5jmuuqsbtzz7avos4drhqmuy4c7ffd35gi3hw2uwbe5iqshfyd.onion"
+      }
+    },
+    "preview-tor": {
+      "extends": "preview",
+      "channel": "preview-tor"
+    },
+    "production": {
+      "autoIncrement": true,
+      "channel": "production",
+      "ios": {
+        "buildConfiguration": "Release",
+        "credentialsSource": "remote"
+      },
+      "android": {
+        "buildType": "app-bundle",
+        "credentialsSource": "remote"
+      },
+      "env": {
+        "APP_ENV": "production",
+        "EXPO_PUBLIC_SERVER_URL": "https://aegislink.duckdns.org",
+        "EXPO_PUBLIC_RELAY_URL": "https://aegislink.duckdns.org",
+        "EXPO_PUBLIC_TURN_URL": "turn:aegislink-turn.duckdns.org:3478",
+        "EXPO_PUBLIC_ONION_URL": "http://fhxnal5jmuuqsbtzz7avos4drhqmuy4c7ffd35gi3hw2uwbe5iqshfyd.onion",
+        "EXPO_PUBLIC_MAILBOX_IOS_WAKE": "on"
+      }
+    },
+    "production-apk": {
+      "extends": "production",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production-foss": {
+      "extends": "production-apk",
+      "env": {
+        "EXPO_PUBLIC_DISTRIBUTION": "foss"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6788507322",
+        "appleTeamId": "X2W7MRTDMJ"
+      },
+      "android": {
+        "serviceAccountKeyPath": "./google-service-account.json",
+        "track": "internal"
+      }
+    }
+  }
+}

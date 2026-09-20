@@ -6,9 +6,11 @@ Mensajería cifrada de extremo a extremo para equipos, donde la organización go
 y con **qué dispositivo**, pero **nunca** puede leer **qué** se dice. Orgs → equipos → salas, roles,
 consola de administración con *zero-knowledge admin*, y despliegue como servicio o en tu propio servidor.
 
-> **Estado: fase de diseño (fase 1).** Este repo contiene hoy las reglas de trabajo, la documentación
-> de concepto/arquitectura y los prototipos de diseño. El código (relay, móvil, desktop) llega a partir
-> de la fase 2. Estado canónico de cada fase y sección: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Estado: semilla técnica (fase 2 hecha, fase 3 en curso).** El repo contiene las reglas de trabajo,
+> la documentación de concepto/arquitectura, los prototipos de diseño y el código base (`server/`,
+> `mobile/`, `desktop/`) heredado del AegisLink personal con tema WORK, ya sin las features que Work
+> no usa. El protocolo de organizaciones (enrolamiento, salas, políticas, consola) llega en las fases
+> 3-4. Estado canónico de cada fase y sección: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Qué es (y qué no)
 
@@ -46,6 +48,16 @@ repo, criptografía, relay y clientes propios. Comparte las reglas de trabajo y 
 | [`docs/adr/`](docs/adr/) | Decisiones de arquitectura |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) · [`docs/TESTING.md`](docs/TESTING.md) · [`docs/PROJECT-STRUCTURE.md`](docs/PROJECT-STRUCTURE.md) | Entorno, CI, estructura |
 | [`SECURITY.md`](SECURITY.md) | Cómo reportar vulnerabilidades |
+
+## Correr en local
+
+Requisitos y comandos completos en [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md); resumen:
+
+```bash
+cd server && npm ci && npm run dev        # Work relay en http://localhost:3001
+cd mobile && npm ci && npx expo start     # app Expo (emulador/dispositivo)
+cd desktop && npm ci && npm run dev       # cliente Electron
+```
 
 ## Prototipos de diseño
 

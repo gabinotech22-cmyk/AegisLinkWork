@@ -1,9 +1,9 @@
 # AegisLink Work — Sistema de diseño
 
 > **Estado:** ✅ Tokens v1 definidos (2026-09-19) en `prototype/theme.jsx` (`WORK`, `WORK_LIGHT`).
-> **Doc canónico** de tema, tokens y componentes (mapa en `CLAUDE.md`). Los tokens se portan a
-> `mobile/src/theme/` y `desktop/src/renderer/theme/` en la fase 2 **desde este doc**; si el
-> código y esta tabla discrepan, se corrige en la misma PR.
+> **Doc canónico** de tema, tokens y componentes (mapa en `CLAUDE.md`). Los tokens viven en
+> `mobile/src/theme/vault.ts` y `desktop/src/renderer/theme/vault.ts` (tema `Work`, fase 2, PR #3);
+> si el código y esta tabla discrepan, se corrige en la misma PR.
 
 ## 1. Decisión
 

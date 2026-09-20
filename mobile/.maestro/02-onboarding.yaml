@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# E2E pilot — anonymous identity generation.
+#
+# Generates a real cryptographic identity (TweetNaCl keypair + X3DH prekeys)
+# and confirms the app advances past onboarding into the main UI.
+#
+# Why this works offline in CI: identity is generated ON-DEVICE first; the relay
+# registration that follows fails, but Onboarding advances anyway (a 10 s
+# fallback in the 'generating' step, Onboarding.tsx), so the flow still leaves
+# the welcome screen. This exercises the real crypto + SecureStore + SQLite
+# paths — the parts that behave identically on an emulator and a physical phone.
+#
+# "No server in CI" used to be an ASSUMPTION, and a wrong one: the bundle is
+# built with `--dev false`, so config.ts resolved SERVER_URL to production and
+# every run registered a real identity against the live relay. ci.yml now pins
+# EXPO_PUBLIC_SERVER_URL to the emulator loopback so the assumption holds.
+#
+# What this does NOT cover (needs a physical device): camera QR scanning, push
+# delivery, WebRTC calls, biometrics. See README.md.
+#
+# Cold-start note: see 01-launch-smoke.yaml — the welcome CTA can take well
+# over Maestro's default timeout to appear on a fresh debug-build emulator
+# while App.tsx hydrates SecureStore/SQLite, so wait for it generously before
+# tapping.
+# ─────────────────────────────────────────────────────────────────────────────
+appId: com.aegislink.app
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible: "Generate my identity"
+    timeout: 60000
+- tapOn: "Generate my identity"
+# PoW + key generation can be slow under Hermes on an emulator (pure-JS KDFs),
+# so allow a generous window. Success == the welcome CTA is gone, i.e. we left
+# onboarding and rendered the main app.
+- extendedWaitUntil:
+    notVisible: "Generate my identity"
+    timeout: 90000
+- takeScreenshot: 02-after-onboarding

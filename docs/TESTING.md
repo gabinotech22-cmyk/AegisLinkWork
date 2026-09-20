@@ -1,9 +1,8 @@
 # AegisLink Work — Testing y CI
 
 > **Doc canónico** de "CI / workflows / cómo se testea" (mapa en `CLAUDE.md`, regla de oro
-> "La doc no miente" #7). Estado: **fase 0/1 — sin paquetes de código todavía**; las secciones de
-> tests por paquete se completan en la fase 2 (semilla técnica) **en la misma PR** que cree `server/`,
-> `mobile/` y `desktop/`. Estado de fases: `docs/ROADMAP.md`.
+> "La doc no miente" #7). Estado: **fase 2 hecha** (PR #3): los tres paquetes existen y sus jobs
+> de CI están activos. Estado de fases: `docs/ROADMAP.md`.
 
 ## Qué corre hoy en CI (`.github/workflows/ci.yml`)
 
@@ -45,14 +44,22 @@ Otros workflows activos desde el día 0:
 
 ## Cómo correr local
 
-Se completa en la fase 2 con los comandos reales de cada paquete. Mientras tanto, lo único
-ejecutable es el prototipo de diseño:
-
 ```bash
-npx --yes serve -l 4180 prototype
+# server (Node 24) — Jest con node:sqlite, --runInBand
+cd server  && npx tsc --noEmit && npm test
+# mobile — Jest + RNTL (jest.config.js; tsconfig.test.json)
+cd mobile  && npx tsc --noEmit && npm test
+# desktop — tsc (main + renderer) y Vitest
+cd desktop && npm run typecheck && npm test
 ```
+
+Un solo archivo: `npm test -- <ruta-o-patrón>` (Jest) / `npx vitest run <ruta>` (desktop).
+Las suites de mobile y desktop son pesadas; en una máquina justa de recursos conviene correr
+solo el typecheck y los archivos tocados, y dejar la suite completa a CI.
 
 ## Troubleshooting
 
-Vacío hasta que exista código. Cada problema real que aparezca se documenta aquí con su causa y
-solución (no en memoria de nadie).
+- **Miles de líneas cambiadas sin tocar nada / `^M` en el diff.** El repo es LF (`.gitattributes`).
+  Si el editor guarda CRLF, `git add --renormalize .` lo corrige; no activar `core.autocrlf=true`.
+- **`npm ci` en `mobile/` falla con npm 11.** Regenerar el lock solo con npm 10 (ver `DEVELOPMENT.md`).
+- **Jest del server no arranca (`node:sqlite`).** Node < 24: el server exige 24+.

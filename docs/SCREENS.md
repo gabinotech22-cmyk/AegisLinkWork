@@ -25,7 +25,7 @@ Leyenda: 🟢 heredada sin cambios · 🟡 adaptada a Work · 🆕 nueva · ⛔ 
 | `Backup` | 🟡 | Backup cifrado del perfil Work (clave del miembro). Para owners, además backup separado de la clave de org. Política `allowBackup` puede desactivarlo. |
 | `DataExport` | 🟡 | Exportación de mis datos; política `allowExport` puede restringir contenido de salas (siempre se pueden exportar certificados y auditoría propia). |
 | `Privacy` | 🟡 → **`WorkPrivacy`** | "Qué ve tu organización / el servicio" (tabla llana de `THREAT-MODEL.md` §4), políticas aplicadas y quién las firmó, Tor/onion opcional, **Abandonar organización** (wipe local + certificado inutilizable; el admin ve el dispositivo caído). Borrado de cuenta del personal → "abandonar org": los registros de auditoría con mi AegisID persisten por diseño (se declara). Prototipo: `screens.jsx` "Work Privacy". |
-| `RelaySettings` | ⛔ | El relay lo fija la organización (viene en la invitación). Solo lectura en `AdminNetwork`. |
+| `RelaySettings` | ⛔ | El relay lo fija la organización (viene en la invitación). Solo lectura en `AdminNetwork`. Eliminada en la semilla (PR #3); `FEDERATION=false` en ambos `config.ts`. |
 
 ## 2. Mensajería
 
@@ -41,7 +41,7 @@ Leyenda: 🟢 heredada sin cambios · 🟡 adaptada a Work · 🆕 nueva · ⛔ 
 | `Poll` | 🟢 | Votación **anónima** E2EE dentro de una sala (diferenciador; se mantiene). |
 | `AttachSheet`, `VoiceRecorder`, `ViewOnce`, `ViewOnceSend`, `Location`, `Scheduled`, `Ephemeral`, `MultiPreview` | 🟢 | Cada uno **gateado por política** (`attachments.*`, `viewOnce`, `locationSharing`, `scheduledMessages`, `retentionMaxDays`). Un ítem desactivado por política aparece deshabilitado con el chip "Forzado por la organización". |
 | `Search` | 🟢 | Índice local cifrado; nunca en relay. |
-| `ChannelCreate`, `ChannelDiscover`, `ChannelFeed`, `ChannelInfo`, `ChannelsPanel` | ⛔ | Canales públicos sellados son del producto personal. |
+| `ChannelCreate`, `ChannelDiscover`, `ChannelFeed`, `ChannelInfo`, `ChannelsPanel` | ⛔ | Canales públicos sellados son del producto personal. Eliminadas en la semilla (PR #3), con su store, crypto, DB, sync en segundo plano y endpoints del relay. |
 
 ## 3. Llamadas
 

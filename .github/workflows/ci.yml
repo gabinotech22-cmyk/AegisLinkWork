@@ -98,7 +98,7 @@ jobs:
       - name: Root is sacred
         run: |
           set -e
-          ALLOWED='^(README\.md|LICENSE|SECURITY\.md|CLAUDE\.md|\.gitignore|\.env\.example|docker-compose\.yml|skills-lock\.json|\.github|\.claude|\.semgrep|\.semgrepignore|docs|prototype|mobile|desktop|server|infra|web|scripts|promo-video)$'
+          ALLOWED='^(README.md|LICENSE|SECURITY.md|CLAUDE.md|.gitignore|.gitattributes|\.env\.example|docker-compose\.yml|skills-lock\.json|\.github|\.claude|\.semgrep|\.semgrepignore|docs|prototype|mobile|desktop|server|infra|web|scripts|promo-video)$'
           BAD=$(git ls-files | awk -F/ '{print $1}' | sort -u | grep -vE "$ALLOWED" || true)
           if [ -n "$BAD" ]; then
             echo "::error::Files/dirs in the repo root that are not on the allowed list (docs/PROJECT-STRUCTURE.md):"

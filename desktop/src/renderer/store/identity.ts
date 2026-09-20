@@ -1,0 +1,611 @@
+import { logger } from '../utils/logger';
+import { create } from 'zustand';
+import { createIdentity, identityFromStored, type Identity } from '../crypto/identity';
+import {
+  loadIdentity,
+  saveIdentity,
+  setActiveDbSlot,
+  closeActiveDatabase,
+  deleteIdentitySlot,
+  purgeLockAndDuressSecrets,
+} from '../db/local';
+import { fetchPowChallenge, solvePoW, uploadIdentityAndPrekeys } from '../crypto/registration';
+import { generatePreKeys } from '../crypto/signal/x3dh';
+import { homeRelayBaseUrl, hydrateHomeRelay, resetHomeRelay } from '../net/homeRelay';
+import '../crypto/ipc-types';
+
+const secureStorage = () => window.aegis.secureStorage;
+const DEV = Boolean(import.meta.env?.DEV);
+
+/** Publication status of this identity on the relay. Mirrors mobile's
+ * src/store/identity.ts PublishStatus — see the mobile file for the full
+ * root-cause writeup (2026-07 registration race). */
+export type PublishStatus = 'unknown' | 'publishing' | 'published' | 'failed';
+
+interface IdentityState {
+  identity: Identity | null;
+  status: 'idle' | 'loading' | 'generating' | 'ready';
+  hydrated: boolean;
+  error: string | null;
+  displayName: string;
+  avatarColor: string;
+  avatarImage: string | null;
+  profileStatus: string;
+
+  /** Whether this identity is confirmed published on the relay. Gates
+   * App.tsx's connectSocket() call — see utils/socketGate.ts. */
+  publishStatus: PublishStatus;
+  publishError: string | null;
+
+  activeSlotId: string;
+  slotsList: string[];
+
+  hydrate: () => Promise<void>;
+  generate: () => Promise<Identity>;
+  linkDevice: (identity: Identity) => Promise<void>;
+  reset: () => Promise<void>;
+  updateProfile: (
+    displayName: string,
+    avatarColor: string,
+    avatarImage: string | null,
+  ) => Promise<void>;
+  updateStatus: (text: string) => Promise<void>;
+
+  /**
+   * Trigger publishToServer (single-flight); updates publishStatus/publishError.
+   * `force=true` bypasses the 'published' early-return ONLY — it never
+   * bypasses the 'publishing' in-flight guard. Used by socket/client.ts's
+   * unknown_identity handler: the relay saying `unknown_identity` is PROOF
+   * that a persisted publishStatus === 'published' (restored by hydrate()
+   * from the `aegis.prekeysPublished.<slot>` flag) is stale — the relay has
+   * forgotten us. Without `force`, retryPublish() would no-op on that stale
+   * 'published' status, leading to an infinite unknown_identity ⇄ reconnect
+   * loop.
+   */
+  retryPublish: (force?: boolean) => Promise<void>;
+
+  createSlot: () => Promise<string>;
+  switchSlot: (slotId: string) => Promise<void>;
+  deleteSlot: (slotId: string) => Promise<void>;
+}
+
+function getPrefKey(key: string, slot: string): string {
+  if (slot === 'self') return key;
+  const suffix = key.replace(/^aegis\./, '');
+  return `aegis.${slot}.${suffix}`;
+}
+
+/**
+ * Optional socket broadcast — the socket module may not be wired up yet in
+ * desktop. We tolerate its absence so identity flows still work standalone.
+ */
+async function tryBroadcastProfileUpdate(identity: Identity): Promise<void> {
+  try {
+    const mod = (await import('../socket/client').catch(() => null)) as
+      | { broadcastProfileUpdate?: (id: Identity) => Promise<void> }
+      | null;
+    if (mod?.broadcastProfileUpdate) await mod.broadcastProfileUpdate(identity);
+  } catch (e) {
+    if (DEV) logger.warn('[identity] broadcast skipped:', (e as Error).message);
+  }
+}
+
+// Single-flight: createNewIdentity and load() can both request a publish in
+// the same tick. Two concurrent publishes generate two DIFFERENT prekey
+// bundles whose secureStorage writes interleave — the persist-readback check
+// then fails and neither bundle is published. Deduplicate instead.
+let publishInFlight: Promise<boolean> | null = null;
+
+function publishToServer(identity: Identity, slotId: string): Promise<boolean> {
+  if (publishInFlight) return publishInFlight;
+  publishInFlight = doPublishToServer(identity, slotId).finally(() => {
+    publishInFlight = null;
+  });
+  return publishInFlight;
+}
+
+/**
+ * Federation F5b: register identity + prekeys at an explicit relay (the
+ * migration target) — the same publish, base URL overridden.
+ */
+export function publishIdentityAt(identity: Identity, relayBaseUrl: string): Promise<boolean> {
+  return doPublishToServer(identity, useIdentity.getState().activeSlotId, relayBaseUrl);
+}
+
+async function doPublishToServer(identity: Identity, slotId: string, relayBaseUrl?: string): Promise<boolean> {
+  const base = relayBaseUrl ?? homeRelayBaseUrl();
+  try {
+    const { challenge, difficulty } = await fetchPowChallenge(base);
+    const nonce = await solvePoW(challenge, difficulty);
+
+    const preKeys = generatePreKeys(identity);
+
+    // Persist SPK/OPK secrets BEFORE publishing the public bundle: a published
+    // SPK whose secret is unreadable makes every inbound X3DH abort ("no-spk").
+    // Dynamic import keeps the store ↔ socket module cycle lazy, matching the
+    // broadcastProfileUpdate pattern above.
+    const { persistPrekeySecrets, persistPqSpkSecret } = await import('../socket/client');
+    const persisted = await persistPrekeySecrets({
+      signedPreKey: { keyId: preKeys.signedPreKey.keyId, secretKey: preKeys.signedPreKey.secretKey },
+      opkSecrets: preKeys.opkSecrets,
+    });
+    if (!persisted) {
+      if (DEV) logger.warn('[identity] publish aborted: could not persist prekey secrets');
+      return false;
+    }
+
+    // PQXDH (v2): persist the PQSPK secret with the same readback invariant. If
+    // it fails we publish a v1-safe bundle (omit pqSignedPreKey) rather than
+    // advertising a PQ prekey we cannot decapsulate later.
+    const pqSpkOk = await persistPqSpkSecret(
+      preKeys.pqSignedPreKey.keyId,
+      preKeys.pqSignedPreKey.secretKey,
+    );
+
+    const result = await uploadIdentityAndPrekeys(
+      identity,
+      {
+        signedPreKey: { keyId: preKeys.signedPreKey.keyId, secretKey: preKeys.signedPreKey.secretKey },
+        opkSecrets: preKeys.opkSecrets,
+      },
+      base,
+      challenge,
+      nonce,
+      preKeys.oneTimePreKeys,
+      {
+        keyId: preKeys.signedPreKey.keyId,
+        publicKeyB64: preKeys.signedPreKey.publicKeyB64,
+        signatureB64: preKeys.signedPreKey.signatureB64,
+      },
+      pqSpkOk
+        ? {
+            keyId: preKeys.pqSignedPreKey.keyId,
+            publicKeyB64: preKeys.pqSignedPreKey.publicKeyB64,
+            signatureB64: preKeys.pqSignedPreKey.signatureB64,
+          }
+        : null,
+    );
+    if (!result.ok) {
+      if (DEV) logger.warn('[identity] publish failed:', result.error);
+      return false;
+    }
+    // Mark this slot's prekeys as published so later boots skip the republish
+    // (which re-runs PoW + re-uploads a fresh bundle, hitting the relay's 429
+    // window). The relay re-requests a fresh bundle via unknown_identity if it
+    // ever forgets us, so on-demand republishing still works.
+    //
+    // Uses the CAPTURED `slotId` param, not `useIdentity.getState().activeSlotId`
+    // (CodeRabbit PR #301 fix): if the user switches/resets/creates a
+    // different slot while THIS publish is still resolving (e.g. createSlot()
+    // backgrounds a publish for a brand-new, non-active slot), reading the
+    // live active slot here would flag the WRONG slot as published.
+    try {
+      await secureStorage().set(getPrefKey('aegis.prekeysPublished', slotId), '1');
+    } catch { /* best-effort flag */ }
+    return true;
+  } catch (e) {
+    if (DEV) logger.warn('[identity] publish failed (network?):', (e as Error).message);
+    return false;
+  }
+}
+
+/**
+ * Wraps publishToServer() (single-flight via publishInFlight) with
+ * publishStatus tracking, mirroring mobile's store/identity.ts runPublish().
+ *
+ * This is the SINGLE choke point every publish path goes through — hydrate(),
+ * generate(), createSlot(), and socket/client.ts's unknown_identity handler
+ * (via retryPublish()) all call this instead of publishToServer() directly,
+ * so connectSocket-gating (utils/socketGate.ts) and the unknown_identity
+ * handler always see a consistent, de-duplicated publishStatus rather than
+ * racing a second concurrent PoW/registration attempt.
+ *
+ * Correctness guard (CodeRabbit PR #301): publishInFlight is module-wide, and
+ * this function used to update useIdentity's GLOBAL publishStatus
+ * unconditionally after the await. If slot A is publishing and the user
+ * switches/resets/creates slot B while that publish is still in flight, B's
+ * runPublish() (or A's own completion, once B is active) could mark the
+ * WRONG slot as 'published'/'failed'. `isCurrentTarget()` re-checks the live
+ * store right before each state write and skips it if this publish's
+ * identity/slot is no longer the active one — the slot-scoped
+ * `aegis.prekeysPublished.<slotId>` marker (written inside
+ * doPublishToServer using the captured slotId, not live state) is unaffected
+ * and always ends up correct regardless of what's active by the time this
+ * resolves.
+ */
+async function runPublish(identity: Identity, slotId: string): Promise<void> {
+  const isCurrentTarget = () => {
+    const s = useIdentity.getState();
+    return s.identity?.aegisId === identity.aegisId && s.activeSlotId === slotId;
+  };
+
+  if (isCurrentTarget()) useIdentity.setState({ publishStatus: 'publishing', publishError: null });
+  const ok = await publishToServer(identity, slotId);
+  if (!isCurrentTarget()) return; // stale — a different identity/slot is active now, ignore
+  if (ok) {
+    useIdentity.setState({ publishStatus: 'published', publishError: null });
+  } else {
+    useIdentity.setState({ publishStatus: 'failed', publishError: 'Registration failed' });
+  }
+}
+
+export const useIdentity = create<IdentityState>((set, get) => ({
+  identity: null,
+  status: 'idle',
+  hydrated: false,
+  error: null,
+  displayName: 'you',
+  avatarColor: '#05b875',
+  avatarImage: null,
+  profileStatus: '',
+
+  publishStatus: 'unknown',
+  publishError: null,
+
+  activeSlotId: 'self',
+  slotsList: ['self'],
+
+  async hydrate() {
+    set({ status: 'loading', error: null });
+    const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T | null> =>
+      Promise.race([p, new Promise<null>((res) => setTimeout(() => res(null), ms))]);
+    try {
+      const { usePreferences } = await import('./preferences');
+      if (usePreferences.getState().duressActive) {
+        const decoyIdentity: Identity = {
+          aegisId: 'AEGIS-MOCK',
+          publicKey: new Uint8Array(32),
+          secretKey: new Uint8Array(32),
+          publicKeyB64: 'mockPublicKeyB64String',
+          secretKeyB64: 'mockSecretKeyB64String',
+          signingPublicKey: new Uint8Array(32),
+          signingSecretKey: new Uint8Array(64),
+          signingPublicKeyB64: 'mockSigningPublicKeyB64String',
+          signingSecretKeyB64: 'mockSigningSecretKeyB64String',
+          createdAt: Date.now(),
+        };
+        set({
+          identity: decoyIdentity,
+          activeSlotId: 'self',
+          slotsList: ['self'],
+          displayName: 'anon.aegis',
+          avatarColor: '#8b5cf6',
+          avatarImage: null,
+          profileStatus: 'Safe & Protected',
+          status: 'ready',
+          hydrated: true,
+          // The decoy must never reach the relay: mark it published so no
+          // background publish/retry ever fires with the decoy identity.
+          publishStatus: 'published',
+          publishError: null,
+        });
+        return;
+      }
+
+      const activeSlotId = (await withTimeout(secureStorage().get('aegis.activeSlotId'), 8000)) || 'self';
+      const slotsListRaw = await withTimeout(secureStorage().get('aegis.slotsList'), 8000);
+      const slotsList = slotsListRaw ? (JSON.parse(slotsListRaw) as string[]) : ['self'];
+
+      setActiveDbSlot(activeSlotId);
+      // Federation F5: the slot's home relay must be known BEFORE anything
+      // registers or connects; never the previous slot's relay.
+      resetHomeRelay();
+      await hydrateHomeRelay();
+
+      const stored = await loadIdentity();
+      if (!stored) {
+        set({ identity: null, activeSlotId, slotsList, status: 'idle', hydrated: true, publishStatus: 'unknown', publishError: null });
+        return;
+      }
+      const identity = identityFromStored(stored);
+
+      const displayName = (await secureStorage().get(getPrefKey('aegis.displayName', activeSlotId))) || identity.aegisId.toLowerCase().replace(/-/g, '');
+      const avatarColor = (await secureStorage().get(getPrefKey('aegis.avatarColor', activeSlotId))) || '#05b875';
+      const avatarImage = (await secureStorage().get(getPrefKey('aegis.avatarImage', activeSlotId))) || null;
+      const profileStatus = (await secureStorage().get(getPrefKey('aegis.profileStatus', activeSlotId))) || '';
+
+      // Publish AFTER the UI is usable — it runs PoW + network round-trips and
+      // must never block boot. Only on first run for this slot: later boots
+      // skip it (the relay re-requests via unknown_identity if it has
+      // actually forgotten us), so we don't burn the relay rate-limit (429).
+      // If already flagged, treat as 'published' immediately (no re-register)
+      // — mirrors mobile's hydrate() `alreadyPublished` fast path so restored
+      // identities from prior sessions connect the socket right away instead
+      // of waiting on a publish that will never run.
+      const alreadyPublished = await secureStorage()
+        .get(getPrefKey('aegis.prekeysPublished', activeSlotId))
+        .catch(() => null);
+
+      set({
+        identity,
+        activeSlotId,
+        slotsList,
+        displayName,
+        avatarColor,
+        avatarImage,
+        profileStatus,
+        status: 'ready',
+        hydrated: true,
+        publishStatus: alreadyPublished ? 'published' : 'unknown',
+        publishError: null,
+      });
+
+      // Populate the UI stores from the local DB — without this the sidebar
+      // starts empty on every boot until a socket event repopulates it.
+      const { useContacts } = await import('./contacts');
+      const { useGroups } = await import('./groups');
+      await useContacts.getState().hydrate().catch(() => {});
+      await useGroups.getState().hydrate().catch(() => {});
+
+      if (!alreadyPublished) void runPublish(identity, activeSlotId);
+    } catch (e) {
+      set({ status: 'idle', hydrated: true, error: (e as Error).message });
+    }
+  },
+
+  async generate() {
+    set({ status: 'generating', error: null });
+    try {
+      const identity = createIdentity();
+      await saveIdentity({
+        aegisId: identity.aegisId,
+        publicKeyB64: identity.publicKeyB64,
+        secretKeyB64: identity.secretKeyB64,
+        signingPublicKeyB64: identity.signingPublicKeyB64,
+        signingSecretKeyB64: identity.signingSecretKeyB64,
+        createdAt: identity.createdAt,
+      });
+
+      const activeSlotId = get().activeSlotId || 'self';
+      const defaultName = identity.aegisId.toLowerCase().replace(/-/g, '');
+      const defaultColor = '#05b875';
+
+      await secureStorage().set(getPrefKey('aegis.displayName', activeSlotId), defaultName);
+      await secureStorage().set(getPrefKey('aegis.avatarColor', activeSlotId), defaultColor);
+      await secureStorage().delete(getPrefKey('aegis.avatarImage', activeSlotId));
+
+      set({
+        identity,
+        displayName: defaultName,
+        avatarColor: defaultColor,
+        avatarImage: null,
+        status: 'ready',
+        publishStatus: 'unknown',
+        publishError: null,
+      });
+
+      // Publish AFTER the identity is in-memory ready: if the relay rejects or is
+      // slow, the identity is already persisted and usable rather than stranded
+      // on disk with the store never reaching 'ready'. Registration runs in the
+      // background; publishStatus updates via runPublish (gates connectSocket —
+      // see utils/socketGate.ts).
+      void runPublish(identity, activeSlotId);
+
+      return identity;
+    } catch (e) {
+      set({ status: 'idle', error: (e as Error).message });
+      throw e;
+    }
+  },
+
+  async linkDevice(identity: Identity) {
+    set({ status: 'generating', error: null });
+    try {
+      await saveIdentity({
+        aegisId: identity.aegisId,
+        publicKeyB64: identity.publicKeyB64,
+        secretKeyB64: identity.secretKeyB64,
+        signingPublicKeyB64: identity.signingPublicKeyB64,
+        signingSecretKeyB64: identity.signingSecretKeyB64,
+        createdAt: identity.createdAt,
+      });
+
+      // No publishToServer because mobile already registered this identity.
+      const activeSlotId = get().activeSlotId || 'self';
+      const defaultName = identity.aegisId.toLowerCase().replace(/-/g, '');
+      const defaultColor = '#3b82f6';
+
+      await secureStorage().set(getPrefKey('aegis.displayName', activeSlotId), defaultName);
+      await secureStorage().set(getPrefKey('aegis.avatarColor', activeSlotId), defaultColor);
+      await secureStorage().delete(getPrefKey('aegis.avatarImage', activeSlotId));
+
+      set({
+        identity,
+        displayName: defaultName,
+        avatarColor: defaultColor,
+        avatarImage: null,
+        status: 'ready',
+        hydrated: true,
+        // Mobile already registered this identity on the relay — mark it
+        // published so connectSocket-gating (utils/socketGate.ts) doesn't
+        // wait on a publish that will never run.
+        publishStatus: 'published',
+        publishError: null,
+      });
+    } catch (e) {
+      set({ status: 'idle', error: (e as Error).message });
+      throw e;
+    }
+  },
+
+  async reset() {
+    const slotsList = get().slotsList || ['self'];
+    for (const slot of slotsList) {
+      await deleteIdentitySlot(slot).catch(() => {});
+    }
+    await secureStorage().delete('aegis.activeSlotId').catch(() => {});
+    await secureStorage().delete('aegis.slotsList').catch(() => {});
+
+    // Delete-identity must NOT leave the app-lock PIN or coercion (duress) PIN
+    // behind (parity with mobile useIdentity.reset()). This also covers the
+    // desktop escape hatch where a failed wipeDatabase() falls back to reset().
+    await purgeLockAndDuressSecrets().catch(() => {});
+
+    const { useContacts } = await import('./contacts');
+    const { useGroups } = await import('./groups');
+    const { useMessages } = await import('./messages');
+    useContacts.setState({ contacts: [], loading: false, error: null });
+    useGroups.setState({ groups: [] });
+    useMessages.setState({ byChat: {}, previews: {}, pinnedMsg: {}, unreadCounts: {}, drafts: {}, pendingMediaUri: null });
+
+    set({
+      identity: null,
+      activeSlotId: 'self',
+      slotsList: ['self'],
+      displayName: 'you',
+      avatarColor: '#05b875',
+      avatarImage: null,
+      profileStatus: '',
+      status: 'idle',
+      publishStatus: 'unknown',
+      publishError: null,
+    });
+  },
+
+  async updateProfile(displayName, avatarColor, avatarImage) {
+    const slotId = get().activeSlotId || 'self';
+    await secureStorage().set(getPrefKey('aegis.displayName', slotId), displayName);
+    await secureStorage().set(getPrefKey('aegis.avatarColor', slotId), avatarColor);
+    if (avatarImage) await secureStorage().set(getPrefKey('aegis.avatarImage', slotId), avatarImage);
+    else await secureStorage().delete(getPrefKey('aegis.avatarImage', slotId));
+    set({ displayName, avatarColor, avatarImage });
+
+    const identity = get().identity;
+    if (identity) await tryBroadcastProfileUpdate(identity);
+  },
+
+  async updateStatus(text) {
+    const slotId = get().activeSlotId || 'self';
+    await secureStorage().set(getPrefKey('aegis.profileStatus', slotId), text);
+    set({ profileStatus: text });
+
+    const identity = get().identity;
+    if (identity) await tryBroadcastProfileUpdate(identity);
+  },
+
+  async retryPublish(force = false) {
+    const { identity, publishStatus, activeSlotId } = get();
+    if (!identity) return;
+    if (!force && publishStatus === 'published') return; // already confirmed (unless forced — see doc comment)
+    if (publishStatus === 'publishing') return; // in-flight — ALWAYS guarded, force never bypasses this
+    await runPublish(identity, activeSlotId || 'self');
+  },
+
+  async createSlot() {
+    set({ status: 'generating', error: null });
+    try {
+      const slotsList = get().slotsList || ['self'];
+      let nextSlotNum = 1;
+      while (slotsList.includes(`slot_${nextSlotNum}`)) nextSlotNum++;
+      const newSlotId = `slot_${nextSlotNum}`;
+
+      const identity = createIdentity();
+      const prevSlot = get().activeSlotId;
+      setActiveDbSlot(newSlotId);
+
+      await saveIdentity({
+        aegisId: identity.aegisId,
+        publicKeyB64: identity.publicKeyB64,
+        secretKeyB64: identity.secretKeyB64,
+        signingPublicKeyB64: identity.signingPublicKeyB64,
+        signingSecretKeyB64: identity.signingSecretKeyB64,
+        createdAt: identity.createdAt,
+      });
+
+      const defaultName = identity.aegisId.toLowerCase().replace(/-/g, '');
+      const defaultColor = '#05b875';
+      await secureStorage().set(getPrefKey('aegis.displayName', newSlotId), defaultName);
+      await secureStorage().set(getPrefKey('aegis.avatarColor', newSlotId), defaultColor);
+
+      // Go through runPublish() (not publishToServer() directly) — it is the
+      // single choke point that keeps publishStatus consistent, per its own
+      // docstring. newSlotId is NOT the active slot at this point (the active
+      // slot stays `prevSlot` — see setActiveDbSlot(prevSlot) below), so
+      // runPublish's isCurrentTarget() guard correctly skips writing this
+      // background publish's outcome into the GLOBAL publishStatus (avoiding
+      // the cross-slot corruption CodeRabbit flagged); the slot-scoped
+      // `aegis.prekeysPublished.<newSlotId>` marker still gets persisted
+      // correctly either way.
+      await runPublish(identity, newSlotId);
+      setActiveDbSlot(prevSlot);
+
+      const newSlotsList = [...slotsList, newSlotId];
+      await secureStorage().set('aegis.slotsList', JSON.stringify(newSlotsList));
+
+      set({ slotsList: newSlotsList, status: 'ready' });
+      return newSlotId;
+    } catch (e) {
+      set({ status: 'ready', error: (e as Error).message });
+      throw e;
+    }
+  },
+
+  async switchSlot(slotId: string) {
+    set({ status: 'loading', error: null });
+    try {
+      try {
+        const mod = (await import('../socket/client').catch(() => null)) as
+          | { getSocket?: () => { disconnect: () => void } | null }
+          | null;
+        const sock = mod?.getSocket?.();
+        if (sock) sock.disconnect();
+      } catch { /* ignore */ }
+
+      await closeActiveDatabase();
+
+      const { useContacts } = await import('./contacts');
+      const { useGroups } = await import('./groups');
+      const { useMessages } = await import('./messages');
+      useContacts.setState({ contacts: [], loading: false, error: null });
+      useGroups.setState({ groups: [] });
+      useMessages.setState({ byChat: {}, previews: {}, pinnedMsg: {}, unreadCounts: {}, drafts: {}, pendingMediaUri: null });
+
+      setActiveDbSlot(slotId);
+      await secureStorage().set('aegis.activeSlotId', slotId);
+
+      set({ activeSlotId: slotId });
+      await get().hydrate();
+
+      const identity = get().identity;
+      if (identity) {
+        try {
+          const mod = (await import('../socket/client').catch(() => null)) as
+            | { connect?: (id: Identity) => void }
+            | null;
+          mod?.connect?.(identity);
+        } catch { /* ignore */ }
+      }
+
+      await useContacts.getState().hydrate().catch(() => {});
+      await useGroups.getState().hydrate().catch(() => {});
+    } catch (e) {
+      set({ status: 'idle', error: (e as Error).message });
+      throw e;
+    }
+  },
+
+  async deleteSlot(slotId: string) {
+    try {
+      const slotsList = get().slotsList || ['self'];
+      const activeSlotId = get().activeSlotId || 'self';
+
+      if (slotId === 'self') {
+        throw new Error('Cannot delete primary slot');
+      }
+
+      if (slotId === activeSlotId) {
+        await get().switchSlot('self');
+      }
+
+      await deleteIdentitySlot(slotId);
+
+      const newSlotsList = slotsList.filter((s) => s !== slotId);
+      await secureStorage().set('aegis.slotsList', JSON.stringify(newSlotsList));
+
+      set({ slotsList: newSlotsList });
+    } catch (e) {
+      set({ error: (e as Error).message });
+      throw e;
+    }
+  },
+}));

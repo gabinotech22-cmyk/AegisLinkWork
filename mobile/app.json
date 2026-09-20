@@ -1,0 +1,218 @@
+{
+  "expo": {
+    "name": "AegisLink Work",
+    "slug": "aegislink-work",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "aegislinkwork",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0a12"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.aegislink.work",
+      "infoPlist": {
+        "NSCameraUsageDescription": "AegisLink Work uses the camera to scan verification QR codes and send encrypted photos.",
+        "NSMicrophoneUsageDescription": "AegisLink Work uses the microphone for encrypted voice and video calls.",
+        "NSPhotoLibraryUsageDescription": "AegisLink Work accesses your photo library to send encrypted attachments.",
+        "NSFaceIDUsageDescription": "AegisLink Work uses Face ID to protect your messages. Your biometric data never leaves the device.",
+        "NSLocalNetworkUsageDescription": "AegisLink Work uses the local network only to establish direct peer-to-peer connections for end-to-end encrypted calls. It never scans or discovers devices on your network.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "voip",
+          "audio",
+          "remote-notification"
+        ],
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false,
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "bitcode": false,
+      "buildNumber": "1"
+    },
+    "notification": {
+      "icon": "./assets/notification-icon.png",
+      "color": "#8b5cf6"
+    },
+    "android": {
+      "package": "com.aegislink.work",
+      "versionCode": 1,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": false,
+          "data": [
+            {
+              "scheme": "aegislinkwork"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ],
+      "compileSdkVersion": 35,
+      "targetSdkVersion": 35,
+      "buildToolsVersion": "35.0.0",
+      "notification": {
+        "icon": "./assets/notification-icon.png",
+        "color": "#8b5cf6",
+        "androidMode": "default",
+        "androidCollapsedTitle": "AegisLink Work · #{unread_notifications} mensajes"
+      },
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b0a12"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+      ],
+      "blockedPermissions": [
+        "android.permission.ACTIVITY_RECOGNITION"
+      ]
+    },
+    "plugins": [
+      "./app.plugin.js",
+      "./plugins/withCallForegroundService.js",
+      "./plugins/withCallWakeService.js",
+      "./plugins/withTorEmbedded.js",
+      "./plugins/withTorEmbeddedIOS.js",
+      "./plugins/withIosVoip.js",
+      "./plugins/withIosBackupExclusion.js",
+      "./plugins/withFossPush.js",
+      "expo-secure-store",
+      [
+        "expo-sqlite",
+        {
+          "useSQLCipher": true
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": false,
+            "enableMinifyInReleaseBuilds": true,
+            "buildArchs": [
+              "arm64-v8a",
+              "x86_64"
+            ]
+          }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "AegisLink Work accesses your photo library to send encrypted view-once media.",
+          "cameraPermission": "AegisLink Work uses the camera to capture encrypted view-once media."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "AegisLink Work uses the camera to scan QR codes and send encrypted photos."
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "AegisLink Work uses the microphone for encrypted voice and video calls."
+        }
+      ],
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Allow AegisLink to access the camera for end-to-end encrypted video calls.",
+          "microphonePermission": "Allow AegisLink to access the microphone for end-to-end encrypted calls."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "AegisLink Work uses your location only when you choose to share it inside an encrypted message. It is never read in the background.",
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": false
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": false
+        }
+      ],
+      "expo-background-fetch",
+      "expo-task-manager",
+      "expo-localization",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#8b5cf6",
+          "iosDisplayInForeground": true,
+          "sounds": [
+            "./assets/sounds/msg_received.mp3",
+            "./assets/sounds/call_incoming.mp3"
+          ]
+        }
+      ],
+      [
+        "expo-alternate-app-icons",
+        {
+          "icons": [
+            {
+              "name": "light",
+              "ios": "./assets/icon-light.png",
+              "android": "./assets/icon-light.png"
+            },
+            {
+              "name": "tinted",
+              "ios": "./assets/icon-tinted.png",
+              "android": "./assets/icon-tinted.png"
+            }
+          ]
+        }
+      ],
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "WORK-EAS-PROJECT-ID-PENDING"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/WORK-EAS-PROJECT-ID-PENDING"
+    },
+    "owner": "aegislinkspejo3"
+  }
+}

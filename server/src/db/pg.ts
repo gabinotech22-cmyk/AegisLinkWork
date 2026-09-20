@@ -1,0 +1,232 @@
+/**
+ * AegisLink — PostgreSQL backend (production)
+ *
+ * Extracted from db/client.ts (M4 god-file split). Pure relocation: no logic,
+ * SQL, or behavior changes. Selected when DATABASE_URL is a postgres:// URL.
+ */
+
+import pg from 'pg';
+
+import { MESSAGE_TTL_MS } from './types';
+const { Pool } = pg;
+
+const DATABASE_URL = process.env.DATABASE_URL ?? '';
+
+let pgPool: pg.Pool | null = null;
+
+export function getPool(): pg.Pool {
+  if (pgPool) return pgPool;
+  pgPool = new Pool({ connectionString: DATABASE_URL });
+  return pgPool;
+}
+
+/** Close the active PG pool and reset module state. Idempotent. */
+export async function closePg(): Promise<void> {
+  if (pgPool) {
+    try { await pgPool.end(); } catch { /* already ended */ }
+    pgPool = null;
+  }
+}
+
+export async function initPgSchema(): Promise<void> {
+  const pool = getPool();
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS identities (
+      aegis_id                TEXT PRIMARY KEY,
+      public_key_b64          TEXT NOT NULL,
+      signing_public_key_b64  TEXT NOT NULL DEFAULT '',
+      created_at              BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id             TEXT PRIMARY KEY,
+      recipient      TEXT NOT NULL,
+      ciphertext_b64 TEXT NOT NULL,
+      nonce_b64      TEXT NOT NULL,
+      created_at     BIGINT NOT NULL,
+      expires_at     BIGINT NOT NULL DEFAULT 0,
+      drained_by     TEXT NOT NULL DEFAULT '[]',
+      sender_pub_b64 TEXT,
+      epk_b64        TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_recipient
+      ON messages(recipient, created_at);
+
+    CREATE TABLE IF NOT EXISTS push_tokens (
+      aegis_id    TEXT NOT NULL,
+      expo_token  TEXT NOT NULL,
+      platform    TEXT NOT NULL,
+      updated_at  BIGINT NOT NULL,
+      PRIMARY KEY (aegis_id, expo_token)
+    );
+
+    -- iOS VoIP (PushKit) tokens — see SQLite schema above for rationale.
+    CREATE TABLE IF NOT EXISTS voip_tokens (
+      aegis_id    TEXT NOT NULL,
+      voip_token  TEXT NOT NULL,
+      updated_at  BIGINT NOT NULL,
+      PRIMARY KEY (aegis_id, voip_token)
+    );
+
+    -- iOS standard APNs tokens (raw hex device token for apns-push-type: alert).
+    -- Separate from push_tokens (Expo) and voip_tokens (PushKit): a message wake
+    -- goes DIRECT to APNs (no Expo hop), like Session's push server. Falls back
+    -- to Expo when absent/unconfigured.
+    CREATE TABLE IF NOT EXISTS apns_tokens (
+      aegis_id    TEXT NOT NULL,
+      apns_token  TEXT NOT NULL,
+      updated_at  BIGINT NOT NULL,
+      PRIMARY KEY (aegis_id, apns_token)
+    );
+
+    -- Sealed-sender (Phase 1) — see SQLite schema above for rationale.
+    CREATE TABLE IF NOT EXISTS delivery_tokens (
+      aegis_id       TEXT PRIMARY KEY,
+      token_hash_b64 TEXT NOT NULL,
+      updated_at     BIGINT NOT NULL
+    );
+
+    -- Slice 2b.3b: UnifiedPush endpoint per mailbox id — see SQLite schema.
+    CREATE TABLE IF NOT EXISTS push_endpoints (
+      mailbox_id TEXT PRIMARY KEY,
+      endpoint   TEXT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    -- Slice 2b.4: Expo/APNs wake token per mailbox id — see SQLite schema.
+    CREATE TABLE IF NOT EXISTS push_mailbox_tokens (
+      mailbox_id TEXT PRIMARY KEY,
+      expo_token TEXT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prekeys_signed (
+      aegis_id       TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT 'default',
+      key_id         INTEGER NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      signature_b64  TEXT NOT NULL,
+      created_at     BIGINT NOT NULL,
+      PRIMARY KEY (aegis_id, device_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS prekeys_onetime (
+      aegis_id       TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT 'default',
+      key_id         INTEGER NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      created_at     BIGINT NOT NULL,
+      PRIMARY KEY (aegis_id, device_id, key_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS prekeys_pq_signed (
+      aegis_id       TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT 'default',
+      key_id         INTEGER NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      signature_b64  TEXT NOT NULL,
+      created_at     BIGINT NOT NULL,
+      PRIMARY KEY (aegis_id, device_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS lightning_invoices (
+      payment_hash  TEXT PRIMARY KEY,
+      bolt11        TEXT NOT NULL,
+      amount_sats   BIGINT NOT NULL,
+      plan_days     INTEGER NOT NULL,
+      created_at    BIGINT NOT NULL,
+      expires_at    BIGINT NOT NULL,
+      paid          INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      payment_hash  TEXT PRIMARY KEY,
+      plan_days     INTEGER NOT NULL,
+      activated_at  BIGINT NOT NULL,
+      expires_at    BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS linked_devices (
+      device_id      TEXT PRIMARY KEY,
+      aegis_id       TEXT NOT NULL,
+      device_pub_key TEXT NOT NULL,
+      device_name    TEXT NOT NULL DEFAULT 'AegisLink Desktop',
+      platform       TEXT NOT NULL DEFAULT 'desktop',
+      linked_at      BIGINT NOT NULL,
+      revoked        INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_linked_devices_aegis
+      ON linked_devices(aegis_id, revoked);
+
+    CREATE TABLE IF NOT EXISTS backups (
+      id_hash    TEXT PRIMARY KEY,
+      envelope   TEXT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sender_key_dist_queue (
+      id              TEXT PRIMARY KEY,
+      recipient       TEXT NOT NULL,
+      group_id        TEXT NOT NULL,
+      sender_aegis_id TEXT NOT NULL,
+      ciphertext_b64  TEXT NOT NULL,
+      nonce_b64       TEXT NOT NULL,
+      iteration       INTEGER NOT NULL,
+      created_at      BIGINT NOT NULL,
+      expires_at      BIGINT NOT NULL,
+      drained_by      TEXT NOT NULL DEFAULT '[]'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_skdq_recipient
+      ON sender_key_dist_queue(recipient, created_at);
+
+    -- AegisLink Work tables removed (ROADMAP Hito 1, audit 2026-09-16). Orphaned
+    -- work_* / workspaces* tables on existing deployments are left untouched.
+
+    -- ── Public Channels (Phase 1, docs/SEALED-PUBLIC-CHANNELS.md) ──────────
+  `);
+
+  // ── PG migrations (safe to run repeatedly) ─────────────────────────────────
+  // These mirror the SQLite ALTER TABLE migrations below. Existing deployments
+  // may have tables from an older schema that lack newer columns. Each statement
+  // is wrapped in a DO block so it's a no-op when the column already exists.
+  const pgMigrations = [
+
+    `ALTER TABLE prekeys_signed ADD COLUMN device_id TEXT NOT NULL DEFAULT 'default'`,
+    `ALTER TABLE prekeys_onetime ADD COLUMN device_id TEXT NOT NULL DEFAULT 'default'`, // M-2
+
+    `ALTER TABLE messages ADD COLUMN drained_by TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE messages ADD COLUMN sender_pub_b64 TEXT`,
+    `ALTER TABLE messages ADD COLUMN epk_b64 TEXT`,
+    // Drain-storm guard (audit 2026-08-08) — see the SQLite migration for the why.
+    `ALTER TABLE messages ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0`,
+    // Legacy rows predating expires_at carry 0, which meant "immortal" to both
+    // drainFor and purgeExpired. Give them the standard TTL from their own age.
+    `UPDATE messages SET expires_at = created_at + ${MESSAGE_TTL_MS} WHERE expires_at = 0`,
+    // C-3 (security roadmap Ola 2): drop the legacy plaintext SenderKey chain key.
+    `ALTER TABLE sender_key_dist_queue DROP COLUMN IF EXISTS chain_key_b64`,
+    // Slice 2 — channel avatars
+  ];
+  for (const ddl of pgMigrations) {
+    try { await pool.query(ddl); } catch { /* column already exists — expected */ }
+  }
+
+  // Fix primary key for prekeys_signed if it was created without device_id.
+  // The old PK was (aegis_id) only; the new PK is (aegis_id, device_id).
+  // This is idempotent: if the PK already includes device_id, the constraint
+  // name won't match or the ADD will fail harmlessly.
+  try {
+    await pool.query(`ALTER TABLE prekeys_signed DROP CONSTRAINT IF EXISTS prekeys_signed_pkey`);
+    await pool.query(`ALTER TABLE prekeys_signed ADD PRIMARY KEY (aegis_id, device_id)`);
+  } catch { /* already correct or concurrent migration — safe to ignore */ }
+
+  // M-2: same PK fix for prekeys_onetime. Old PK was (aegis_id, key_id); the new
+  // PK is (aegis_id, device_id, key_id). Existing rows keep device_id='default'
+  // (self-consistent with the 'default' SPK uploaded at onboarding).
+  try {
+    await pool.query(`ALTER TABLE prekeys_onetime DROP CONSTRAINT IF EXISTS prekeys_onetime_pkey`);
+    await pool.query(`ALTER TABLE prekeys_onetime ADD PRIMARY KEY (aegis_id, device_id, key_id)`);
+  } catch { /* already correct or concurrent migration — safe to ignore */ }
+}

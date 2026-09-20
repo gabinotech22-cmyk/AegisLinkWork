@@ -35,15 +35,38 @@
       `SECURITY-PARITY.md` (checklist de ~40 defensas por fase).
 - [ ] Revisión del dueño (abre issues por cada objeción; se cierran antes de la fase 2).
 
-### Fase 2 — Semilla técnica 🔴 PENDIENTE
+### Fase 2 — Semilla técnica ✅ HECHO (2026-09-20, PR #3)
 Criterio de hecho: `tsc` y suites verdes en `server/`, `mobile/`, `desktop/` en CI; app arranca
 en emulador y desktop con tema WORK; ningún resto de features del personal que Work no usa.
-- [ ] Copiar del personal (SHA fijado en ADR-0001): `mobile/src/{crypto,db,socket,lock,security,notifications,theme,components,i18n,hooks,utils}`, `desktop/src/{main,preload,renderer/{socket,crypto,theme}}`, `server/src/{auth,crypto,pow,push,relay,db,http}` + tests.
-- [ ] Eliminar solo lo que `SCREENS.md` marca ⛔: canales públicos sellados, `RelaySettings`/federación entre relays, `web3/did` (queda pagos como stub). Se **conservan** perfiles aislados (→ un perfil por org), encuestas anónimas, llamadas de grupo en malla, broadcast (→ anuncios).
-- [ ] `SECURITY-PARITY.md`: todas las filas 🟢 de fase 2 verdes en CI (mismos tests que el personal).
-- [ ] Tema WORK en ambos clientes; app id `com.aegislink.work`; iconos `icon-work`.
-- [ ] `DEVELOPMENT.md` y `TESTING.md` completados con comandos reales.
-- [ ] `.semgrep/` + regla nueva: ningún `SELECT` sin `org_id`.
+- [x] Copiado del personal (`origin/main` = `6ad6f6f`, 2026-09-19; ADR-0001): `mobile/`, `desktop/`
+      y `server/` completos con sus tests (no solo los módulos de crypto: el criterio "arranca en
+      emulador y desktop" exige el shell entero). Finales de línea normalizados a LF
+      (`.gitattributes`); el personal se editaba con CRLF en Windows.
+- [x] Eliminado lo que `SCREENS.md` marca ⛔ (PR #3):
+      - canales públicos sellados: `mobile/src/{channels,api/publicChannels,crypto/publicChannel*,db/channelFeed,store/channels,notifications/channelBackgroundSync,socket/publicChannels}`,
+        pantallas `Channel*`, segmento Canales de `Groups`, posts de canal programados, deep link
+        `aegislink://channel/`; `server/src/{routes,relay/handlers}/publicChannels`, tablas
+        `public_channel*` y el pin de avatares en `routes/blob.ts`.
+      - `RelaySettings` (mobile + desktop) y la fila "Mi relay" de Privacidad; `FEDERATION` es una
+        constante `false` en ambos `config.ts` (el relay lo fija la invitación de la org). El
+        resto de la capa de red heredada (`net/homeRelay`, `relayMigration`) se sustituye en la
+        fase 3 con el protocolo de org.
+      - `mobile/src/web3` (DIDs, revocación por DID), tabla `revoked_did_hashes` y los endpoints
+        `/web3/did/*` y `/web3/device/*` del relay. **Queda** `/web3/subscription/*` +
+        `lightning_invoices` como stub de pagos (sección 17).
+      - Certificado OTA de firma del personal (`mobile/certs/`) y `mobile/.github/` (workflow
+        anidado, GitHub no lo ejecuta): Work genera su propio par de firma en la fase 6.
+      Se **conservan** perfiles aislados, encuestas anónimas, llamadas de grupo en malla, broadcast.
+- [x] `SECURITY-PARITY.md`: las filas 🟢 entran con sus tests tal cual (suites del personal en CI:
+      `server-test`, `mobile-test`, `desktop-test`).
+- [x] Tema WORK en ambos clientes (`theme/vault.ts`: `#8b5cf6`/`#6d28d9`); app id
+      `com.aegislink.work`, slug `aegislink-work`, scheme `aegislinkwork`; paquetes
+      `aegislink-work-{mobile,desktop,server}`. Iconos `icon-work`: pendiente de diseño (fase 4,
+      junto con las pantallas nuevas; los actuales son los del personal).
+- [x] `DEVELOPMENT.md` y `TESTING.md` con comandos reales.
+- [ ] ~~`.semgrep/` regla "ningún `SELECT` sin `org_id`"~~ → **movida a la fase 3**: hoy no
+      existe ninguna tabla con `org_id`, así que la regla fallaría en todo el relay heredado o
+      habría que silenciarla entera. Entra en la misma PR que cree los repos con `orgId`.
 
 ### Fase 3 — Server Work 🔴 PENDIENTE
 Criterio: `PROTOCOL.md` §3-§9 implementado con un test por endpoint/evento sensible y tests de
@@ -53,6 +76,7 @@ aislamiento entre orgs; `THREAT-MODEL.md` §3 con test enlazado en T1, T2, T3, T
 - [ ] Orgs, equipos, miembros, salas, `room:key_dist/msg/rekey`, políticas, retención con TTL.
 - [ ] Audit log = firmas; exportación JSON/CSV escapada.
 - [ ] `TENANCY=multi|single`, repos con `orgId` obligatorio.
+- [ ] `.semgrep/` regla: ningún `SELECT` sin `org_id` en los repos de org (viene de la fase 2).
 
 ### Fase 4 — Clientes Work (mobile + desktop en paralelo) 🔴 PENDIENTE
 Criterio: flujos 5.1-5.6 de `CONCEPT.md` funcionando end-to-end en ambos clientes contra el
