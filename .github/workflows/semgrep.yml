@@ -52,6 +52,32 @@ jobs:
             --sarif --output semgrep.sarif \
             --error || true
 
+      # GitHub code scanning ignores the SARIF `suppressions` property, so a
+      # finding annotated `// nosemgrep: <rule>` in source (the sanctioned way
+      # to justify a dev-only fallback, see .semgrep/aegislink-rules.yml) still
+      # became a red "Semgrep OSS" alert. Drop suppressed results here; the
+      # justification lives next to the code, where reviewers read it.
+      - name: Drop in-source-suppressed findings from the SARIF
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          with open('semgrep.sarif') as f:
+              sarif = json.load(f)
+          dropped = 0
+          for run in sarif.get('runs', []):
+              kept = []
+              for r in run.get('results', []):
+                  if r.get('suppressions'):
+                      dropped += 1
+                  else:
+                      kept.append(r)
+              run['results'] = kept
+          with open('semgrep.sarif', 'w') as f:
+              json.dump(sarif, f)
+          print(f'dropped {dropped} suppressed finding(s)')
+          PY
+
       - name: Upload SARIF to code scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
