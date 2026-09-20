@@ -156,7 +156,7 @@ Para no desviarnos: cada archivo tiene un único sitio correcto. El detalle y el
 completo están en `docs/PROJECT-STRUCTURE.md`; lo obligatorio es esto:
 
 1. **La raíz es sagrada.** Solo viven en raíz: `README.md`, `LICENSE`, `SECURITY.md`,
-   `CLAUDE.md`, `.gitignore`, `.env.example`, `docker-compose.yml`, `skills-lock.json`
+   `CLAUDE.md`, `.gitignore`, `.gitattributes`, `.env.example`, `docker-compose.yml`, `skills-lock.json`
    y los dotfiles de tooling. Nada más nuevo sin justificación explícita.
 2. **Cada cosa a su carpeta.** Código de producto → `mobile/`/`desktop/`/`server/`/`web/`.
    Documentación → `docs/`. Scripts operativos → `scripts/`. Prototipos de diseño → `prototype/`.

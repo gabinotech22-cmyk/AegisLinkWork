@@ -1,8 +1,8 @@
 # AegisLink Work — Desarrollo Local
 
-> **Doc canónico** de "Requisitos de entorno" (mapa en `CLAUDE.md`). Estado: **fase 0/1** — el repo
-> contiene reglas, docs y prototipo; los paquetes `server/`, `mobile/` y `desktop/` llegan en la fase 2
-> y esta doc se completa **en esa misma PR**. Estado de fases: `docs/ROADMAP.md`.
+> **Doc canónico** de "Requisitos de entorno" (mapa en `CLAUDE.md`). Estado: **fase 2 hecha**
+> (PR #3): existen `server/`, `mobile/` y `desktop/` y los comandos de abajo son los reales.
+> Estado de fases: `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -22,7 +22,17 @@ cp .env.example .env
 # Edita .env: TENANCY, BLOB_SECRET, TURN_SECRET, URLs del relay.
 ```
 
-Instalación de dependencias por paquete: se documenta en la fase 2 (`cd server && npm install`, etc.).
+Cada paquete tiene su propio `package-lock.json`; se instala con `npm ci` (nunca `npm install`
+para no reescribir el lock):
+
+```bash
+cd server  && npm ci
+cd mobile  && npm ci
+cd desktop && npm ci
+```
+
+Finales de línea: el repo es **LF** (`.gitattributes`, `* text=auto eol=lf`). Un checkout en
+Windows también recibe LF; no cambiar `core.autocrlf` a `true` en este repo.
 
 ## Variables de entorno
 
@@ -42,7 +52,26 @@ sección, en la misma PR que la lee del entorno:
 
 ## Levantar el stack
 
-Fase 2. Mientras tanto, el único artefacto ejecutable es el prototipo de diseño:
+```bash
+# 1. Relay (Node 24). Lee .env de la raíz; SQLite en server/data/ (gitignored).
+cd server && npm run dev            # http://localhost:3001
+
+# 2. Mobile (Expo SDK 54). En el emulador Android el relay es http://10.0.2.2:3001
+#    (mobile/src/config.ts SERVER_URL_DEV); override con EXPO_PUBLIC_SERVER_URL.
+cd mobile && npx expo start         # o: npx expo run:android / run:ios
+
+# 3. Desktop (Electron + Vite). VITE_RELAY_URL apunta al relay.
+cd desktop && npm run dev
+```
+
+Typecheck por paquete (lo mismo que corre CI): `npx tsc --noEmit` en `server/` y `mobile/`,
+`npm run typecheck` en `desktop/`. Tests: ver `docs/TESTING.md`.
+
+En producción un build Work **falla cerrado** si no se le da relay: `SERVER_URL_PROD` apunta a
+`work-relay.aegislink.invalid` salvo `EXPO_PUBLIC_SERVER_URL`/`VITE_RELAY_URL`, para que un
+cliente Work nunca alcance el relay del AegisLink personal por accidente.
+
+Prototipo de diseño (sin código):
 
 ```bash
 npx --yes serve -l 4180 prototype

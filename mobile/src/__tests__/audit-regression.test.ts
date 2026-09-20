@@ -1,0 +1,259 @@
+/**
+ * Audit regression tests (Section #14 of the production security audit).
+ *
+ * These are static-analysis (grep/AST-ish) and behavioural tests that lock in
+ * the fixes for the May-2026 audit so a future careless edit doesn't silently
+ * re-introduce a vulnerability. Each test maps to a finding ID (C-1, C-2,
+ * H-1, H-2, H-3, H-5) and fails loud if the regression returns.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import nacl from 'tweetnacl';
+import { decodeUTF8, encodeBase64 } from 'tweetnacl-util';
+import { handlePanicDeepLink } from '../utils/panicLink';
+import { useIdentity } from '../store/identity';
+
+const SRC = path.resolve(__dirname, '..');
+
+/** Recursively collect *.ts and *.tsx files under `dir`, skipping tests/mocks. */
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === '__tests__' || entry.name === '__mocks__' || entry.name === 'node_modules') continue;
+      out.push(...walk(p));
+    } else if (/\.(ts|tsx)$/.test(entry.name)) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+function grepFiles(re: RegExp, files: string[]): Array<{ file: string; line: number; match: string }> {
+  const hits: Array<{ file: string; line: number; match: string }> = [];
+  for (const f of files) {
+    const lines = fs.readFileSync(f, 'utf8').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(re);
+      if (m) hits.push({ file: path.relative(SRC, f), line: i + 1, match: m[0] });
+    }
+  }
+  return hits;
+}
+
+describe('C-1 — no hardcoded Tenor / Google API keys', () => {
+  it('rejects any AIzaSy* literal in the source tree', () => {
+    const allFiles = walk(SRC);
+    const hits = grepFiles(/AIzaSy[A-Za-z0-9_-]{33}/g, allFiles);
+    expect(hits).toEqual([]);
+  });
+
+  it('rejects any TENOR_KEY hardcoded constant', () => {
+    const allFiles = walk(SRC);
+    const hits = grepFiles(/const\s+TENOR_KEY\s*=\s*['"][^'"]+['"]/g, allFiles);
+    expect(hits).toEqual([]);
+  });
+});
+
+describe('C-2 / H-2 — no direct third-party fetches that leak the user IP', () => {
+  it('GifPicker never calls tenor.googleapis.com directly', () => {
+    const gifPicker = path.join(SRC, 'components', 'GifPicker.tsx');
+    const src = fs.readFileSync(gifPicker, 'utf8');
+    expect(src).not.toMatch(/tenor\.googleapis\.com/);
+    expect(src).toMatch(/\/proxy\/gif/); // must use relay proxy
+  });
+
+  it('LinkPreview never calls external URLs directly', () => {
+    const linkPreview = path.join(SRC, 'components', 'LinkPreview.tsx');
+    const src = fs.readFileSync(linkPreview, 'utf8');
+    // The fetch call should target the relay's /proxy/linkpreview endpoint
+    expect(src).toMatch(/\/proxy\/linkpreview/);
+    // It should NOT pass an external URL straight to fetch()
+    expect(src).not.toMatch(/await fetch\(url[,\s)]/);
+  });
+});
+
+describe('H-1 — SecureStore wrapper enforces AFTER_FIRST_UNLOCK', () => {
+  it('utils/secureStore.ts exists and passes AFTER_FIRST_UNLOCK', () => {
+    const wrapper = path.join(SRC, 'utils', 'secureStore.ts');
+    expect(fs.existsSync(wrapper)).toBe(true);
+    const src = fs.readFileSync(wrapper, 'utf8');
+    expect(src).toMatch(/AFTER_FIRST_UNLOCK/);
+  });
+
+  it('migrated callers no longer import SecureStore directly', () => {
+    const migratedFiles = [
+      'store/profiles.ts',
+      'lock/pin.ts',
+      'screens/Backup.tsx',
+      'screens/AppIcon.tsx',
+      'store/preferences.ts',
+      'screens/Panic.tsx',
+    ];
+    for (const rel of migratedFiles) {
+      const p = path.join(SRC, rel);
+      if (!fs.existsSync(p)) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      // Either they import { ss } from the wrapper, OR they don't import SecureStore at all.
+      const importsWrapper = /from\s+['"][./]+utils\/secureStore['"]/.test(src);
+      const importsRawSS = /import\s+\*\s+as\s+SecureStore\s+from\s+['"]expo-secure-store['"]/.test(src);
+      // Migrated files MUST import the wrapper. They MAY also keep a raw import
+      // ONLY if they need APIs the wrapper doesn't expose (e.g. AFTER_FIRST_UNLOCK
+      // constant or getValueWithKeyAsync). Bare raw import + no wrapper = regression.
+      expect(importsWrapper || !importsRawSS).toBe(true);
+    }
+  });
+});
+
+describe('H-3 — Backup is on Argon2id v3, still reads v1/v2', () => {
+  it('BACKUP_VERSION is 3', () => {
+    const backup = path.join(SRC, 'crypto', 'backup.ts');
+    const src = fs.readFileSync(backup, 'utf8');
+    expect(src).toMatch(/BACKUP_VERSION\s*=\s*3\s+as\s+const/);
+  });
+
+  it('decryptBackup handles all three versions (v1, v2, v3)', () => {
+    const backup = path.join(SRC, 'crypto', 'backup.ts');
+    const src = fs.readFileSync(backup, 'utf8');
+    // The dispatch must reference all three version numbers somewhere
+    expect(src).toMatch(/===\s*1/);
+    expect(src).toMatch(/===\s*2/);
+    expect(src).toMatch(/===\s*3|=== BACKUP_VERSION/);
+  });
+});
+
+describe('H-5 — handlePanicDeepLink rejects malformed / unsigned tokens', () => {
+  beforeEach(() => {
+    // Reset identity store so we can plant a controlled keypair below.
+    useIdentity.setState({ identity: null } as never, false);
+  });
+
+  it('rejects URLs that are not aegislink://panic', async () => {
+    const ok = await handlePanicDeepLink('https://example.com/?token=x&sig=y');
+    expect(ok).toBe(false);
+  });
+
+  it('rejects panic URLs without a sig parameter', async () => {
+    const ok = await handlePanicDeepLink('aegislink://panic?token=abcd');
+    expect(ok).toBe(false);
+  });
+
+  it('rejects panic URLs when identity is not loaded', async () => {
+    const ok = await handlePanicDeepLink('aegislink://panic?token=abcd&sig=xyz');
+    expect(ok).toBe(false);
+  });
+
+  it('rejects panic URLs with a forged (non-matching) signature', async () => {
+    // Plant a fake identity in the store.
+    const realKp = nacl.sign.keyPair();
+    const attackerKp = nacl.sign.keyPair();
+    useIdentity.setState({
+      identity: {
+        aegisId: 'AAA-AAAA-AAAA',
+        publicKey: new Uint8Array(32),
+        secretKey: new Uint8Array(32),
+        publicKeyB64: '',
+        secretKeyB64: '',
+        signingPublicKey: realKp.publicKey,
+        signingSecretKey: realKp.secretKey,
+        signingPublicKeyB64: encodeBase64(realKp.publicKey),
+        signingSecretKeyB64: encodeBase64(realKp.secretKey),
+        createdAt: Date.now(),
+      },
+    } as never, false);
+
+    // Attacker signs the same token with their key — should be rejected.
+    const token = 'forged-token-uuid';
+    const forgedSig = encodeBase64(nacl.sign.detached(decodeUTF8(token), attackerKp.secretKey));
+    const ok = await handlePanicDeepLink(`aegislink://panic?token=${token}&sig=${encodeURIComponent(forgedSig)}`);
+    expect(ok).toBe(false);
+  });
+});
+
+describe('Duress unlock never reveals panic/settings screens (source regression)', () => {
+  // Bug: unlocking with the duress/coercion PIN from the Panic-mode config
+  // screen (or any other sensitive screen) returned to that same screen
+  // after the auto-lock, revealing to a coercer that panic/duress mode
+  // exists. A duress unlock must always land on the decoy chat/home view.
+  const APP_TSX = path.resolve(SRC, '..', 'App.tsx');
+
+  it('App.tsx pops the "panic" route (not just profileSwitcher/createProfile) while duress is active', () => {
+    const src = fs.readFileSync(APP_TSX, 'utf8');
+    const guardIdx = src.indexOf("topRoute?.name === 'profileSwitcher'");
+    expect(guardIdx).toBeGreaterThan(-1);
+    // The defense-in-depth pop effect must also cover 'panic', on the same
+    // guard condition as profileSwitcher/createProfile.
+    const guardBlockEnd = src.indexOf('pop();', guardIdx);
+    const guardBlock = src.slice(guardIdx, guardBlockEnd);
+    expect(guardBlock).toMatch(/topRoute\?\.name === 'panic'/);
+  });
+
+  it('App.tsx resets the nav stack to home on the duressActive false->true transition', () => {
+    const src = fs.readFileSync(APP_TSX, 'utf8');
+    // A ref must track the previous duressActive value so the reset fires
+    // only on the transition, not on every render while duress stays active
+    // (which would otherwise trap the decoy session mid-navigation).
+    expect(src).toMatch(/wasDuressActiveRef/);
+    const effectIdx = src.indexOf('if (duressActive && !wasDuressActiveRef.current)');
+    expect(effectIdx).toBeGreaterThan(-1);
+    const effectBlockEnd = src.indexOf('}', src.indexOf('{', effectIdx));
+    const effectBlock = src.slice(effectIdx, effectBlockEnd);
+    expect(effectBlock).toMatch(/setStack\(\[\]\)/);
+    expect(effectBlock).toMatch(/setTab\('home'\)/);
+  });
+
+  it("case 'panic' renders null under duress (same guard pattern as profileSwitcher/createProfile)", () => {
+    const src = fs.readFileSync(APP_TSX, 'utf8');
+    const caseIdx = src.indexOf("case 'panic':");
+    expect(caseIdx).toBeGreaterThan(-1);
+    const nextCaseIdx = src.indexOf("case '", caseIdx + 1);
+    const caseBlock = src.slice(caseIdx, nextCaseIdx);
+    expect(caseBlock).toMatch(/usePreferences\.getState\(\)\.duressActive\)\s*return null;/);
+  });
+});
+
+describe('M-2 — transport hardening (AegisLink Work seed)', () => {
+  // The personal edition pins its relay host at build time. A Work client has
+  // no fixed relay at build time: the organization's invitation carries
+  // `relayUrl` + `relayPins` and the client pins at enrolment (fase 4,
+  // docs/PROTOCOL.md §4, docs/SECURITY-PARITY.md). What must hold in the seed:
+  //   (a) NOTHING points a Work build at the personal relay — no personal
+  //       domain, no personal SPKI pins, in either platform's manifest;
+  //   (b) cleartext stays forbidden by default on Android.
+  const PERSONAL_RELAY_HOST = 'aegislink.duckdns.org';
+  const PERSONAL_SPKI_PINS = [
+    's/tdAOmUzd8syaTuqfgGvFcn6DzA5Cmb+Vby1ST+U3Y=', // LE YE2 intermediate
+    'ikzWA3NEA1YVdzZPkMmfU1/noMRdEdVGyxCkuSNpihA=', // personal leaf
+    'LvglXAxgB9K5SCOZrLvdX0VVc8UuEU+Bj6r58LSA7r8=', // personal offline backup key
+    'sCkq5UWXjg+7mKu9lMhhYF5bGLsy7VI/UNW3tccdR7w=', // ISRG Root YE anchor
+  ];
+  const appJson = fs.readFileSync(path.resolve(SRC, '..', 'app.json'), 'utf8');
+  const plugin = fs.readFileSync(path.resolve(SRC, '..', 'app.plugin.js'), 'utf8');
+
+  it('no manifest references the personal relay host', () => {
+    expect(appJson).not.toContain(PERSONAL_RELAY_HOST);
+    // The plugin may name the host in prose; it must not appear in the XML it emits.
+    const xml = plugin.match(/const NETWORK_SECURITY_XML = `([\s\S]*?)`;/)?.[1] ?? '';
+    expect(xml.length).toBeGreaterThan(0);
+    expect(xml).not.toContain(PERSONAL_RELAY_HOST);
+  });
+
+  it('no manifest carries the personal SPKI pins (iOS NSPinnedDomains or Android pin-set)', () => {
+    for (const pin of PERSONAL_SPKI_PINS) {
+      expect(appJson).not.toContain(pin);
+      expect(plugin).not.toContain(pin);
+    }
+    expect(appJson).not.toMatch(/NSPinnedDomains/);
+    expect(plugin).not.toMatch(/<pin-set/);
+  });
+
+  it('Android base-config forbids cleartext (only dev loopback and .onion opt in)', () => {
+    const xml = plugin.match(/const NETWORK_SECURITY_XML = `([\s\S]*?)`;/)?.[1] ?? '';
+    expect(xml).toMatch(/<base-config cleartextTrafficPermitted="false">/);
+    const optIns = [...xml.matchAll(/<domain-config cleartextTrafficPermitted="true">([\s\S]*?)<\/domain-config>/g)]
+      .flatMap((m) => [...m[1].matchAll(/<domain[^>]*>([^<]+)<\/domain>/g)].map((d) => d[1]));
+    expect(optIns.sort()).toEqual(['10.0.2.2', '127.0.0.1', 'localhost', 'onion']);
+  });
+});

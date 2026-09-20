@@ -1,0 +1,382 @@
+import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import i18n from '../i18n';
+import { useTheme } from '../theme/ThemeContext';
+import type { Theme } from '../theme/vault';
+import { I } from '../components/icons';
+import { TopBar } from '../components/TopBar';
+import { Section, Toggle } from '../components/Section';
+import { usePreferences } from '../store/preferences';
+import { setPIN, clearPIN, hasStoredPIN } from '../lock/pin';
+import { getDbKEK } from '../lock/dbKeyWrap';
+
+interface Props {
+  onBack: () => void;
+  onLockTest: () => void;
+  onLockSettings?: () => void;
+}
+
+const TIMEOUT_OPTIONS = [0, 1, 5, 15, 60];
+
+function PinDots({ count, t }: { count: number; t: Theme }) {
+  useTranslation(); // re-render on language change
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', gap: 16, justifyContent: 'center', marginTop: 28, marginBottom: 28 }}>
+      {[0, 1, 2, 3].map((i) => (
+        <div
+          key={i}
+          style={{
+            width: 16,
+            height: 16,
+            borderRadius: 8,
+            backgroundColor: i < count ? t.accent : 'transparent',
+            border: `2px solid ${i < count ? t.accent : t.borderStrong}`,
+            boxSizing: 'border-box',
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Numpad({ onDigit, onDelete, t }: { onDigit: (d: string) => void; onDelete: () => void; t: Theme }) {
+  const keys = ['1','2','3','4','5','6','7','8','9','','0','⌫'];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap', width: 240, alignSelf: 'center' }}>
+      {keys.map((k, i) => {
+        if (!k) return <div key={i} style={{ width: 80, height: 64 }} />;
+        const isDel = k === '⌫';
+        return (
+          <button
+            key={i}
+            onClick={() => isDel ? onDelete() : onDigit(k)}
+            aria-label={isDel ? 'Delete' : k}
+            style={{ width: 80, height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          >
+            <div style={{
+              width: 56, height: 56, borderRadius: 28,
+              backgroundColor: isDel ? 'transparent' : t.surface2,
+              border: isDel ? 'none' : `1px solid ${t.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <span style={{ fontFamily: isDel ? t.font : t.fontDisplay, fontSize: isDel ? 20 : 22, fontWeight: '500', color: t.text }}>{k}</span>
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export function LockConfigScreen({ onBack, onLockTest, onLockSettings }: Props) {
+  useTranslation(); // re-render on language change
+  const { t } = useTheme();
+  // Persisted lock prefs live in the preferences store (App.tsx reads them to
+  // drive cold-lock + inactivity timeout). The PIN hash itself lives in the
+  // secure keystore via lock/pin.ts; `pinStored` mirrors its presence.
+  const appLockEnabled = usePreferences((s) => s.appLockEnabled);
+  const biometricsEnabled = usePreferences((s) => s.biometricsEnabled);
+  const lockTimeoutMin = usePreferences((s) => s.lockTimeoutMin);
+  const hideRecents = usePreferences((s) => s.hideRecents);
+  const setPref = usePreferences((s) => s.set);
+  const [pinStored, setPinStored] = useState(false);
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [pinStep, setPinStep] = useState<'enter' | 'confirm'>('enter');
+  const [firstPin, setFirstPin] = useState('');
+  const [pinEntry, setPinEntry] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [showTimeout, setShowTimeout] = useState(false);
+  const [shakeModal, setShakeModal] = useState(false);
+  const pendingEnable = useRef(false);
+
+  // Reflect whether a PIN hash actually exists in the keystore.
+  useEffect(() => {
+    void (async () => {
+      try { setPinStored(await hasStoredPIN()); } catch { /* treat as no PIN */ }
+    })();
+  }, []);
+
+  function shake() {
+    setShakeModal(true);
+    setTimeout(() => setShakeModal(false), 400);
+  }
+
+  function openPinModal(isPendingEnable = false) {
+    pendingEnable.current = isPendingEnable;
+    setPinStep('enter');
+    setFirstPin('');
+    setPinEntry('');
+    setPinError('');
+    setShowPinModal(true);
+  }
+
+  function handleDigit(d: string) {
+    if (pinEntry.length >= 4) return;
+    const next = pinEntry + d;
+    setPinEntry(next);
+    setPinError('');
+    if (next.length === 4) setTimeout(() => processPin(next), 180);
+  }
+
+  function handleDelete() {
+    setPinEntry((p) => p.slice(0, -1));
+    setPinError('');
+  }
+
+  function processPin(pin: string) {
+    if (pinStep === 'enter') {
+      setFirstPin(pin);
+      setPinStep('confirm');
+      setPinEntry('');
+    } else {
+      if (pin !== firstPin) {
+        setPinError(i18n.t('lockConfig.pinMismatch'));
+        shake();
+        setPinEntry('');
+        setPinStep('enter');
+        setFirstPin('');
+      } else {
+        // Persist the Argon2id-hashed PIN before flipping any UI state, so we
+        // never enable the lock with a PIN we failed to store (which would make
+        // the lock screen unenterable).
+        void (async () => {
+          try {
+            await setPIN(pin);
+            setPinStored(true);
+            // Fase 2: (re)wrap the DB key under the PIN-derived KEK so the PIN
+            // becomes a real at-rest second factor (cold-start unlock derives the
+            // same KEK to open the DB). Same call covers first-set and change-PIN.
+            const kek = await getDbKEK(pin);
+            await window.aegis.db.enablePinWrap(kek);
+            if (pendingEnable.current) {
+              await setPref('appLockEnabled', true);
+              pendingEnable.current = false;
+            }
+            setShowPinModal(false);
+          } catch {
+            setPinError(i18n.t('lockConfig.couldNotSavePin'));
+            shake();
+            setPinEntry('');
+            setPinStep('enter');
+            setFirstPin('');
+          }
+        })();
+      }
+    }
+  }
+
+  function handleToggleAppLock(val: boolean) {
+    if (val && !pinStored) {
+      openPinModal(true);
+      return;
+    }
+    if (!val) {
+      // Disabling the lock must also UNWRAP the DB key (revert to DPAPI-only) and
+      // clear the PIN, so the cold-start gate — keyed on the crypto wrap state,
+      // not this preference — never contradicts the toggle.
+      void (async () => {
+        await window.aegis.db.disablePinWrap().catch(() => {});
+        await clearPIN().catch(() => {});
+        setPinStored(false);
+        await setPref('appLockEnabled', false);
+      })();
+      return;
+    }
+    void setPref('appLockEnabled', val);
+  }
+
+  function handleClearPin() {
+    if (window.confirm(i18n.t('lockConfig.deletePinAppLock'))) {
+      void (async () => {
+        // Unwrap the DB key first (revert to DPAPI-only) so no cold lock remains.
+        await window.aegis.db.disablePinWrap().catch(() => {});
+        await clearPIN();
+        setPinStored(false);
+        await setPref('appLockEnabled', false);
+      })();
+    }
+  }
+
+  function getTimeoutLabel(val: number) {
+    if (val === 0) return 'Immediately';
+    if (val === 60) return '1 hour';
+    return `${val} minutes`;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, height: '100%', backgroundColor: t.bg }}>
+      <style>{`
+        @keyframes aegis-shake-modal {
+          0%,100% { transform: translateX(0); }
+          20% { transform: translateX(-10px); }
+          40% { transform: translateX(10px); }
+          60% { transform: translateX(-8px); }
+          80% { transform: translateX(8px); }
+        }
+      `}</style>
+
+      <TopBar t={t} title={i18n.t('lockConfig.titleBar')} left={
+        <button onClick={onBack} aria-label={i18n.t('distLists.backA11y')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+          <I.ChevronL size={22} color={t.textDim} />
+        </button>
+      } />
+
+      <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 32 }}>
+        <Section t={t} label={i18n.t('lockConfig.accessProtection')}>
+          <Toggle t={t} label={i18n.t('lockConfig.appLock')} sub={appLockEnabled ? i18n.t('lockConfig.appLockActive') : i18n.t('lockConfig.appLockDisabled')} value={appLockEnabled} onChange={handleToggleAppLock} />
+
+          {appLockEnabled && (
+            <>
+              <Toggle t={t} label={i18n.t('lockSetup.faceIdHuella')} sub={i18n.t('lockConfig.useBiometricsAsPrimary')} value={biometricsEnabled} onChange={(v) => void setPref('biometricsEnabled', v)} />
+
+              <button
+                onClick={() => setShowTimeout((v) => !v)}
+                aria-label={i18n.t('lockConfig.inactivityTime')}
+                style={{
+                  display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                  paddingLeft: 16, paddingRight: 16, paddingTop: 13, paddingBottom: 13,
+                  backgroundColor: 'transparent', borderBottom: `1px solid ${t.divider}`,
+                  width: '100%', cursor: 'pointer', border: 'none', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: t.divider, boxSizing: 'border-box',
+                }}
+              >
+                <span style={{ fontFamily: t.font, fontSize: 14, color: t.text }}>{i18n.t('lockConfig.inactivityTime')}</span>
+                <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: t.fontMono, fontSize: 12, color: t.accent }}>{getTimeoutLabel(lockTimeoutMin)}</span>
+                  <I.ChevronD size={14} color={t.textFaint} />
+                </div>
+              </button>
+
+              {showTimeout && (
+                <div style={{ backgroundColor: t.surface2 }}>
+                  {TIMEOUT_OPTIONS.map((opt, i) => (
+                    <button
+                      key={opt}
+                      onClick={() => { void setPref('lockTimeoutMin', opt); setShowTimeout(false); }}
+                      aria-label={getTimeoutLabel(opt)}
+                      style={{
+                        display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                        paddingLeft: 24, paddingRight: 24, paddingTop: 12, paddingBottom: 12,
+                        backgroundColor: 'transparent', width: '100%', cursor: 'pointer',
+                        borderBottom: i < TIMEOUT_OPTIONS.length - 1 ? `1px solid ${t.divider}` : 'none',
+                        border: 'none', borderBottomWidth: i < TIMEOUT_OPTIONS.length - 1 ? 1 : 0, borderBottomStyle: 'solid', borderBottomColor: t.divider, boxSizing: 'border-box',
+                      }}
+                    >
+                      <span style={{ fontFamily: t.font, fontSize: 14, color: t.text }}>{getTimeoutLabel(opt)}</span>
+                      {lockTimeoutMin === opt && <I.Check size={16} color={t.accent} />}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <button
+                onClick={() => openPinModal(false)}
+                aria-label={pinStored ? i18n.t('lockConfig.changePin') : i18n.t('lockConfig.setPin')}
+                style={{
+                  display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                  paddingLeft: 16, paddingRight: 16, paddingTop: 13, paddingBottom: 13,
+                  backgroundColor: 'transparent', borderBottom: `1px solid ${t.divider}`,
+                  width: '100%', cursor: 'pointer', border: 'none', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: t.divider, boxSizing: 'border-box',
+                }}
+              >
+                <span style={{ fontFamily: t.font, fontSize: 14, color: t.text }}>{pinStored ? i18n.t('lockConfig.changePin') : i18n.t('lockConfig.setPin')}</span>
+                <I.Chevron size={16} color={t.textFaint} />
+              </button>
+
+              {pinStored && (
+                <button
+                  onClick={handleClearPin}
+                  aria-label={i18n.t('lockConfig.deletePin')}
+                  style={{
+                    display: 'block', textAlign: 'left', paddingLeft: 16, paddingRight: 16, paddingTop: 13, paddingBottom: 13,
+                    backgroundColor: 'transparent', borderBottom: `1px solid ${t.divider}`,
+                    width: '100%', cursor: 'pointer', border: 'none', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: t.divider, boxSizing: 'border-box',
+                  }}
+                >
+                  <span style={{ fontFamily: t.font, fontSize: 14, color: '#ef4444' }}>{i18n.t('lockConfig.deletePin')}</span>
+                </button>
+              )}
+
+              <button
+                onClick={onLockTest}
+                aria-label={i18n.t('lockConfig.lockNowTest2')}
+                style={{
+                  display: 'block', textAlign: 'left', paddingLeft: 16, paddingRight: 16, paddingTop: 13, paddingBottom: 13,
+                  backgroundColor: 'transparent', width: '100%', cursor: 'pointer', border: 'none', boxSizing: 'border-box',
+                }}
+              >
+                <span style={{ fontFamily: t.font, fontSize: 14, color: t.accent }}>{i18n.t('lockConfig.lockNowTest')}</span>
+              </button>
+            </>
+          )}
+        </Section>
+
+        {onLockSettings && (
+          <Section t={t} label={i18n.t('lockConfig.advanced')}>
+            <button
+              onClick={onLockSettings}
+              aria-label={i18n.t('lockConfig.lockSettings')}
+              style={{
+                display: 'flex', flexDirection: 'row', alignItems: 'center',
+                paddingLeft: 16, paddingRight: 16, paddingTop: 13, paddingBottom: 13,
+                backgroundColor: 'transparent', width: '100%', cursor: 'pointer', border: 'none', boxSizing: 'border-box',
+              }}
+            >
+              <I.Settings size={16} color={t.textDim} />
+              <span style={{ fontFamily: t.font, fontSize: 14, color: t.text, marginLeft: 10, flex: 1, textAlign: 'left' }}>{i18n.t('lockConfig.lockSettings')}</span>
+              <I.Chevron size={14} color={t.textFaint} />
+            </button>
+          </Section>
+        )}
+
+        <Section t={t} label={i18n.t('lockConfig.screenPrivacy')}>
+          <Toggle t={t} label={i18n.t('lockConfig.hideRecents')} sub={i18n.t('lockConfig.screenGoesBlackWhen')} value={hideRecents} onChange={(v) => void setPref('hideRecents', v)} noBorder />
+        </Section>
+
+        <div style={{ paddingLeft: 18, paddingRight: 18, marginTop: 10 }}>
+          <span style={{ fontFamily: t.font, fontSize: 12, color: t.textDim, lineHeight: '18px', display: 'block' }}>{i18n.t('lockConfig.aegislinkHasNoAccess')}</span>
+        </div>
+      </div>
+
+      {/* PIN Modal */}
+      {showPinModal && (
+        <div style={{
+          position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+        }}>
+          <div style={{
+            backgroundColor: t.bg, borderRadius: t.radius, padding: 24, width: 320, maxWidth: '90vw',
+            boxSizing: 'border-box',
+          }}>
+            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <button onClick={() => { setShowPinModal(false); pendingEnable.current = false; }} aria-label={i18n.t('common.cancel')} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+                <span style={{ fontFamily: t.font, fontSize: 15, color: t.accent }}>{i18n.t('common.cancel')}</span>
+              </button>
+              <span style={{ fontFamily: t.font, fontSize: 16, fontWeight: '600', color: t.text }}>
+                {pinStored ? i18n.t('lockConfig.changePin') : i18n.t('lockConfig.setPin')}
+              </span>
+              <div style={{ width: 60 }} />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <span style={{ fontFamily: t.font, fontSize: 15, color: t.textDim, marginBottom: 4 }}>
+                {pinStep === 'enter' ? i18n.t('lockConfig.enterA4Digit') : i18n.t('lockConfig.confirmPinPrompt')}
+              </span>
+
+              <div style={{ animation: shakeModal ? 'aegis-shake-modal 0.4s ease' : 'none', width: '100%', display: 'flex', justifyContent: 'center' }}>
+                <PinDots count={pinEntry.length} t={t} />
+              </div>
+
+              {pinError ? (
+                <span style={{ fontFamily: t.font, fontSize: 13, color: '#ef4444', marginBottom: 16, textAlign: 'center' }}>{pinError}</span>
+              ) : (
+                <div style={{ height: 36 }} />
+              )}
+
+              <Numpad onDigit={handleDigit} onDelete={handleDelete} t={t} />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

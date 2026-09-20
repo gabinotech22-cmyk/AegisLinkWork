@@ -33,7 +33,7 @@ trackea un artefacto de build. **La raíz es sagrada: solo lo canónico vive ah�
 ## Qué puede vivir en la raíz (lista cerrada)
 
 Solo estos, y nada más nuevo sin justificación:
-`README.md`, `LICENSE`, `SECURITY.md`, `CLAUDE.md`, `.gitignore`, `.env.example`,
+`README.md`, `LICENSE`, `SECURITY.md`, `CLAUDE.md`, `.gitignore`, `.gitattributes`, `.env.example`,
 `docker-compose.yml`, `skills-lock.json`, y los dotfiles de tooling (`.github/`, `.claude/`,
 `.semgrep/`, `.semgrepignore`). Esta lista **es** la expresión regular `ALLOWED` del job
 `repo-hygiene` en `.github/workflows/ci.yml`: cambiar una implica cambiar la otra.

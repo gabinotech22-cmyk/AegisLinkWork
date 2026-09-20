@@ -1,0 +1,451 @@
+import { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, Animated, Easing, Pressable, ActivityIndicator, TextInput } from 'react-native';
+import { copySensitiveText } from '../utils/secureClipboard';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTranslation } from 'react-i18next';
+import { useTheme } from '../theme/ThemeContext';
+import type { Theme } from '../theme/vault';
+import { AegisMark, AegisWord } from '../components/AegisMark';
+import { Identicon } from '../components/Identicon';
+import { I } from '../components/icons';
+import { PrimaryButton, GhostButton } from '../components/Button';
+import { useIdentity } from '../store/identity';
+import { fingerprintHex } from '../crypto/fingerprint';
+import { useLocale } from '../i18n/useLocale';
+import type { SupportedLocale } from '../i18n';
+import { themedAlert } from '../components/AlertHost';
+
+interface Props {
+  onDone: () => void;
+  onRestore: () => void;
+  /** True once the SQLite DB is confirmed open. Generate button is disabled until then. */
+  dbReady?: boolean;
+}
+
+type Step = 'welcome' | 'generating' | 'show' | 'nickname';
+
+const AVATAR_COLOR_SWATCHES = ['#8b5cf6', '#3ba3f0', '#8b7cf6', '#f06fb0', '#f0a93b', '#f0664b'];
+
+export function OnboardingScreen({ onDone, onRestore, dbReady = true }: Props) {
+  const { t, dark, toggle } = useTheme();
+  const { t: i18nT } = useTranslation();
+  const { locale, setLocale } = useLocale();
+  const insets = useSafeAreaInsets();
+  const [step, setStep] = useState<Step>('welcome');
+  const { identity, generate, avatarColor, updateProfile, retryPublish } = useIdentity();
+  const [fingerprint, setFingerprint] = useState<string[]>([]);
+  const [nickname, setNickname] = useState('');
+  const [selectedColor, setSelectedColor] = useState<string>(
+    AVATAR_COLOR_SWATCHES.includes(avatarColor) ? avatarColor : AVATAR_COLOR_SWATCHES[0],
+  );
+  // Tracks when the 'generating' step started so we can enforce a minimum
+  // animation duration of 2 s even on fast devices.
+  const generatingStartRef = useRef<number>(0);
+
+  async function handleGenerate() {
+    if (step !== 'welcome') return;
+    generatingStartRef.current = Date.now();
+    setStep('generating');
+    try {
+      await generate();
+    } catch (e) {
+      themedAlert(i18nT('onboarding.generateError'), (e as Error).message);
+      setStep('welcome');
+    }
+  }
+
+  // Advance to 'show' as soon as identity is ready AND at least 2 s of
+  // animation have elapsed (so the spinner never flashes by on fast devices).
+  useEffect(() => {
+    if (step === 'generating' && identity) {
+      const elapsed = Date.now() - generatingStartRef.current;
+      const minDelay = Math.max(0, 2000 - elapsed);
+      const t = setTimeout(() => setStep('show'), minDelay);
+      return () => clearTimeout(t);
+    }
+  }, [step, identity]);
+
+  // Hard fallback: if generate() takes longer than 10 s (very slow device),
+  // advance anyway so the user is not stuck on the spinner indefinitely.
+  useEffect(() => {
+    if (step === 'generating') {
+      const fallback = setTimeout(() => setStep('show'), 10000);
+      return () => clearTimeout(fallback);
+    }
+  }, [step]);
+
+  useEffect(() => {
+    if (step === 'show' && identity) {
+      setFingerprint(fingerprintHex(identity.publicKey));
+    }
+  }, [step, identity]);
+
+  async function handleEnter() {
+    if (!identity) return;
+    // Registration is already running in the background via the identity store
+    // (triggered by generate()). We kick an extra retryPublish in case it
+    // finished with 'failed' (e.g. first attempt timed out). We then proceed
+    // to Home regardless — publishStatus drives the retry banner in Home.
+    void retryPublish();
+    onDone();
+  }
+
+  const containerPad = { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 20 };
+
+  // Default display name mirrors the identity store's own fallback derivation
+  // (aegisId lowercased, dashes stripped) so the placeholder and helper text
+  // always agree with what will actually be persisted if the user skips.
+  const defaultName = identity ? identity.aegisId.toLowerCase().replace(/-/g, '') : '';
+
+  async function handleContinueFromNickname() {
+    const trimmed = nickname.trim();
+    const colorChanged = selectedColor !== avatarColor;
+    if (trimmed || colorChanged) {
+      try {
+        await updateProfile(trimmed || defaultName, selectedColor, null);
+      } catch (e) {
+        themedAlert(i18nT('common.error', 'Error'), (e as Error).message);
+        return;
+      }
+    }
+    await handleEnter();
+  }
+
+  async function handleSkipNickname() {
+    await handleEnter();
+  }
+
+  // ── Step 0: Welcome ─────────────────────────────────────────────────────────
+  if (step === 'welcome') {
+    return (
+      <View style={[styles.frame, { backgroundColor: t.bg }, containerPad]}>
+        {/* Top-right controls: theme toggle + language toggle */}
+        <View style={{ position: 'absolute', top: insets.top + 16, right: 24, zIndex: 10, flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+          {/* Dark / light toggle */}
+          <Pressable
+            onPress={toggle}
+            accessibilityLabel={dark ? i18nT('onboarding.switchLight', 'Switch to light mode') : i18nT('onboarding.switchDark', 'Switch to dark mode')}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 99,
+              borderWidth: 1,
+              borderColor: t.border,
+              backgroundColor: t.surface2,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {dark
+              ? <I.Sun size={15} color={t.textDim} />
+              : <I.Moon size={15} color={t.textDim} />}
+          </Pressable>
+
+          {/* Language toggle */}
+          <Pressable
+            onPress={() => {
+              if (locale === 'en') {
+                void setLocale('it');
+              } else if (locale === 'it') {
+                void setLocale('es');
+              } else {
+                void setLocale('en');
+              }
+            }}
+            accessibilityLabel={i18nT('onboarding.langToggle')}
+            style={{
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+              borderRadius: 99,
+              borderWidth: 1,
+              borderColor: t.border,
+              backgroundColor: t.surface2,
+            }}
+          >
+            <Text style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textDim, letterSpacing: 0.8 }}>
+              {locale === 'en' ? 'EN | IT | ES' : locale === 'it' ? 'IT | ES | EN' : 'ES | EN | IT'}
+            </Text>
+          </Pressable>
+        </View>
+
+        <View style={{ marginTop: 40, marginBottom: 28, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+          <AegisMark t={t} size={56} />
+          <AegisWord t={t} size={30} />
+        </View>
+        <Text style={[styles.h1, { color: t.text, fontFamily: t.fontDisplay }]}>
+          {i18nT('onboarding.tagline')}
+        </Text>
+        <Text style={[styles.lead, { color: t.textDim, fontFamily: t.font, marginBottom: 'auto' as never }]}>
+          {i18nT('onboarding.lead')}
+        </Text>
+        <View style={{ gap: 10 }}>
+          {/* DB cold-start gate: button is disabled until SQLite is open.
+              The spinner is small and matches t.textDim so it doesn't alarm users. */}
+          {!dbReady && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 2 }}>
+              <ActivityIndicator size="small" color={t.textDim} />
+              <Text style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textDim, letterSpacing: 0.5 }}>
+                {i18nT('onboarding.dbInitializing', 'Initializing secure storage…')}
+              </Text>
+            </View>
+          )}
+          <PrimaryButton
+            t={t}
+            label={i18nT('onboarding.generateBtn')}
+            onPress={handleGenerate}
+            disabled={!dbReady}
+          />
+          <GhostButton
+            t={t}
+            label={i18nT('onboarding.restoreBtn')}
+            onPress={onRestore}
+          />
+        </View>
+        <Text style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textFaint, textAlign: 'center', marginTop: 18, letterSpacing: 0.6 }}>
+          {i18nT('onboarding.footer')}
+        </Text>
+      </View>
+    );
+  }
+
+  // ── Step 1: Generating ──────────────────────────────────────────────────────
+  if (step === 'generating') {
+    return (
+      <View style={[styles.frame, { backgroundColor: t.bg, justifyContent: 'center', alignItems: 'center' }, containerPad]}>
+        <KeySpinner t={t} />
+        <Text style={{ fontFamily: t.fontDisplay, fontSize: 24, fontWeight: '600', letterSpacing: -0.48, color: t.text, marginTop: 36, textAlign: 'center' }}>
+          {i18nT('onboarding.generatingTitle')}
+        </Text>
+        <Text style={{ fontFamily: t.fontMono, fontSize: 11, color: t.textDim, marginTop: 12, letterSpacing: 0.4, textAlign: 'center' }}>
+          {i18nT('onboarding.generatingSubtitle')}
+        </Text>
+        <View style={{ marginTop: 28, width: '100%' }}>
+          <ProgressBar t={t} />
+        </View>
+        <Pressable onPress={() => setStep('show')} style={{ marginTop: 32 }}>
+          <Text style={{ fontFamily: t.fontMono, fontSize: 11, color: t.accent, letterSpacing: 1.0 }}>
+            {i18nT('onboarding.skipAnimation')}
+          </Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  // ── Step 3: Nickname (optional) ─────────────────────────────────────────────
+  if (step === 'nickname') {
+    return (
+      <View style={[styles.frame, { backgroundColor: t.bg, paddingHorizontal: 24 }, containerPad]}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 }}>
+          <AegisMark t={t} size={28} />
+          <Text style={{ fontFamily: t.fontMono, fontSize: 11, color: t.accent, letterSpacing: 1.1 }}>
+            {i18nT('onboarding.almostDone')}
+          </Text>
+        </View>
+
+        <Text style={{ fontFamily: t.fontDisplay, fontSize: 28, color: t.text, fontWeight: '600', letterSpacing: -0.56, marginBottom: 10 }}>
+          {i18nT('onboarding.nicknameTitle')}
+        </Text>
+        <Text style={{ fontFamily: t.font, fontSize: 14, color: t.textDim, lineHeight: 20, marginBottom: 24 }}>
+          {i18nT('onboarding.nicknameSubtitle')}
+        </Text>
+
+        <View style={{ alignItems: 'center', marginBottom: 16 }}>
+          <View
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 32,
+              backgroundColor: t.surface2,
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+            }}
+          >
+            {identity && (
+              <Identicon seed={identity.publicKeyB64} color={selectedColor} size={64} rounded />
+            )}
+          </View>
+        </View>
+
+        <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12, marginBottom: 24 }}>
+          {AVATAR_COLOR_SWATCHES.map((c) => {
+            const selected = c === selectedColor;
+            return (
+              <Pressable
+                key={c}
+                onPress={() => setSelectedColor(c)}
+                accessibilityLabel={i18nT('onboarding.colorSwatchLabel', { color: c })}
+                accessibilityRole="button"
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 15,
+                  backgroundColor: c,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderWidth: selected ? 2 : 0,
+                  borderColor: t.accent,
+                }}
+              />
+            );
+          })}
+        </View>
+
+        <Label t={t}>{i18nT('onboarding.nicknameLabel')}</Label>
+        <TextInput
+          value={nickname}
+          onChangeText={setNickname}
+          placeholder={defaultName}
+          placeholderTextColor={t.textFaint}
+          maxLength={20}
+          autoCapitalize="none"
+          autoCorrect={false}
+          style={{
+            color: t.text,
+            backgroundColor: t.surface,
+            borderColor: t.borderStrong,
+            borderWidth: 1,
+            borderRadius: t.radiusS,
+            padding: 12,
+            fontSize: 15,
+            marginBottom: 8,
+            fontFamily: t.font,
+          }}
+        />
+        <Text style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textFaint, letterSpacing: 0.4, marginBottom: 'auto' as never }}>
+          {i18nT('onboarding.nicknameDefault', { name: defaultName })}
+        </Text>
+
+        <View style={{ gap: 10 }}>
+          <PrimaryButton
+            t={t}
+            label={i18nT('onboarding.continueBtn')}
+            onPress={handleContinueFromNickname}
+          />
+          <GhostButton
+            t={t}
+            label={i18nT('onboarding.skipNickname')}
+            onPress={handleSkipNickname}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  // ── Step 2: Show identity ───────────────────────────────────────────────────
+  return (
+    <View style={[styles.frame, { backgroundColor: t.bg, paddingHorizontal: 24 }, containerPad]}>
+      <Text style={{ fontFamily: t.fontMono, fontSize: 11, color: t.accent, letterSpacing: 1.1, marginBottom: 14 }}>
+        {i18nT('onboarding.yourIdentityLabel')}
+      </Text>
+      <Text style={{ fontFamily: t.fontDisplay, fontSize: 28, color: t.text, fontWeight: '600', letterSpacing: -0.56, marginBottom: 24 }}>
+        {i18nT('onboarding.identityTitle')}
+      </Text>
+
+      <View style={{ borderWidth: 1, borderColor: t.borderStrong, borderRadius: t.radius, padding: 20, marginBottom: 16, backgroundColor: t.surface }}>
+        <Label t={t}>{i18nT('onboarding.aegisIdLabel')}</Label>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <Text style={{ fontFamily: t.fontMono, fontSize: 22, color: t.text }}>
+            {identity?.aegisId ?? '— — —'}
+          </Text>
+          {identity && (
+            <Pressable
+              onPress={async () => {
+                try { await copySensitiveText(identity.aegisId); } catch { /* clipboard unavailable */ }
+              }}
+              style={{ padding: 6 }}
+              hitSlop={8}
+            >
+              <I.Copy size={16} color={t.textDim} />
+            </Pressable>
+          )}
+        </View>
+        <Label t={t}>{i18nT('onboarding.fingerprintLabel')}</Label>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+          {(fingerprint.length === 0 ? Array(8).fill('····') : fingerprint).map((f, i) => (
+            <View
+              key={i}
+              style={{ width: '23.5%', backgroundColor: t.surface2, borderRadius: t.radiusS, paddingVertical: 6, alignItems: 'center' }}
+            >
+              <Text style={{ fontFamily: t.fontMono, fontSize: 12, color: t.text }}>{f}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+
+      <Text style={{ fontFamily: t.font, fontSize: 13, color: t.textDim, lineHeight: 20, marginBottom: 'auto' as never }}>
+        {i18nT('onboarding.identityWarning')}
+      </Text>
+
+      <PrimaryButton
+        t={t}
+        label={i18nT('onboarding.continueBtn')}
+        onPress={() => setStep('nickname')}
+      />
+    </View>
+  );
+}
+
+function Label({ t, children }: { t: Theme; children: React.ReactNode }) {
+  return (
+    <Text style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textDim, letterSpacing: 1.0, marginBottom: 8 }}>
+      {children}
+    </Text>
+  );
+}
+
+function KeySpinner({ t }: { t: Theme }) {
+  const [spin] = useState(new Animated.Value(0));
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(spin, { toValue: 1, duration: 1400, easing: Easing.linear, useNativeDriver: true })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [spin]);
+  const rotate = spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  return (
+    <View style={{ width: 96, height: 96, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View
+        style={{
+          width: 96, height: 96, borderRadius: 48,
+          borderWidth: 2, borderColor: t.surface3, borderTopColor: t.accent,
+          transform: [{ rotate }], position: 'absolute',
+        }}
+      />
+      <View style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' }}>
+        <I.Key size={26} stroke={1.8} color={t.accent} />
+      </View>
+    </View>
+  );
+}
+
+function ProgressBar({ t }: { t: Theme }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(anim, {
+      toValue: 1,
+      duration: 10000,
+      easing: Easing.linear,
+      useNativeDriver: false,
+    }).start();
+  }, [anim]);
+  return (
+    <View style={{ height: 3, backgroundColor: t.surface3, borderRadius: 99, overflow: 'hidden' }}>
+      <Animated.View
+        style={{
+          height: '100%',
+          width: anim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
+          backgroundColor: t.accent,
+          borderRadius: 99,
+        }}
+      />
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  frame: { flex: 1, paddingHorizontal: 28 },
+  h1: { fontSize: 40, lineHeight: 41, fontWeight: '600', letterSpacing: -1.2, marginBottom: 16 },
+  lead: { fontSize: 16, lineHeight: 23 },
+});

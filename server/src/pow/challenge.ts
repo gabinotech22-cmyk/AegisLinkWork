@@ -1,0 +1,115 @@
+/**
+ * Proof-of-Work challenge store — in-memory only.
+ * No IP is persisted anywhere. The Map key is the opaque challenge token;
+ * the IP is used solely by the rate limiter in express and never stored here.
+ */
+
+import { createHash, randomBytes } from 'node:crypto';
+
+/** Difficulty: number of leading zero BITS required in SHA-256(nonce + challenge). */
+export const POW_DIFFICULTY = 14; // ~16 k hashes on average — trivial for a real client, costly for bulk bots
+
+/**
+ * A-2: registration is the squatting-sensitive flow (one identity per solve), so
+ * it gets a harder PoW than the high-frequency blob-upload flow. Raised to 18
+ * bits (~256 k hashes, still well under a second on a real device) in production;
+ * kept at the base difficulty in dev/test to keep the suite fast. Bots that want
+ * to bulk-mint aegisIds now pay ~16× more work per identity.
+ */
+export const REGISTRATION_POW_DIFFICULTY =
+  process.env['NODE_ENV'] === 'production' ? 18 : POW_DIFFICULTY;
+
+/**
+ * Challenge TTL in milliseconds.
+ * Raised from 5 to 15 minutes: on slow, non-JIT hardware (e.g. Hermes on an
+ * iPhone 8) mining the registration PoW at REGISTRATION_POW_DIFFICULTY (18
+ * bits, geometric distribution -> high variance) can take longer than the
+ * old 300s window, causing registration to fail permanently since the retry
+ * loop requests a brand-new challenge instead of resuming prior work. The
+ * anti-abuse cost is enforced by the difficulty, not the TTL, so widening
+ * this window only gives honest slow devices more wall-clock margin — it
+ * does not reduce the work a bot must do. See docs/ROADMAP-2026-07.md §2.
+ */
+export const CHALLENGE_TTL_MS = 900_000;
+
+/**
+ * Federation F6 (docs/FEDERATION-DESIGN.md D5): optional proof-of-work on
+ * mailbox SUBMISSION (`envelope:mb`). A self-hosted relay accepts sealed
+ * envelopes from disposable mailboxes that never register anything, so under
+ * spam pressure the operator can charge a small PoW per envelope
+ * (MAILBOX_SUBMIT_POW=on). Deliberately lighter than registration: it is paid
+ * on every message, by real clients, on phones.
+ */
+export const MAILBOX_SUBMIT_POW_DIFFICULTY = 12; // ~4 k hashes — milliseconds on a phone
+
+export function isMailboxSubmitPowEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env['MAILBOX_SUBMIT_POW'] ?? 'off').toLowerCase() === 'on';
+}
+
+interface ChallengeEntry {
+  challenge: string; // hex
+  expiresAt: number;
+  /** Difficulty bound at issuance so a client cannot solve at a lower difficulty. */
+  difficulty: number;
+}
+
+// Keyed by challenge string itself — no IP stored.
+const store = new Map<string, ChallengeEntry>();
+
+// Lazy GC: prune expired entries whenever a new challenge is issued.
+function pruneExpired(): void {
+  const now = Date.now();
+  for (const [key, entry] of store) {
+    if (entry.expiresAt <= now) store.delete(key);
+  }
+}
+
+export function issueChallenge(
+  difficulty: number = POW_DIFFICULTY,
+): { challenge: string; difficulty: number; expiresAt: number } {
+  pruneExpired();
+  const challenge = randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + CHALLENGE_TTL_MS;
+  store.set(challenge, { challenge, expiresAt, difficulty });
+  return { challenge, difficulty, expiresAt };
+}
+
+/**
+ * Verify that SHA-256(nonce + challenge) has at least `POW_DIFFICULTY` leading zero bits.
+ * Consumes the challenge (one-time use) on success.
+ * Returns an error string on failure, null on success.
+ */
+export function verifyPoW(challenge: string, nonce: string): string | null {
+  const entry = store.get(challenge);
+  if (!entry) return 'challenge_unknown';
+  if (Date.now() > entry.expiresAt) {
+    store.delete(challenge);
+    return 'challenge_expired';
+  }
+
+  // Validate nonce is a reasonable hex string (max 16 bytes / 32 hex chars)
+  if (!/^[0-9a-f]{1,32}$/.test(nonce)) return 'invalid_nonce_format';
+
+  const digest = createHash('sha256')
+    .update(nonce + challenge)
+    .digest();
+
+  // Verify against the difficulty bound at issuance (anti-downgrade).
+  if (!hasLeadingZeroBits(digest, entry.difficulty)) return 'insufficient_pow';
+
+  // One-time use — consume immediately on success.
+  store.delete(challenge);
+  return null;
+}
+
+function hasLeadingZeroBits(buf: Buffer, bits: number): boolean {
+  let remaining = bits;
+  for (const byte of buf) {
+    if (remaining <= 0) break;
+    const check = remaining >= 8 ? 8 : remaining;
+    const mask = 0xff & (0xff << (8 - check));
+    if ((byte & mask) !== 0) return false;
+    remaining -= 8;
+  }
+  return true;
+}

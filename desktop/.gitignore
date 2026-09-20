@@ -1,0 +1,8 @@
+node_modules/
+out/
+dist/
+.vite/
+*.db
+keystore.json
+.env
+resources/tor/

@@ -1,0 +1,276 @@
+/**
+ * AegisLink — SQLite backend (development / default)
+ *
+ * Extracted from db/client.ts (M4 god-file split). Pure relocation: no logic,
+ * SQL, or behavior changes. See db/client.ts for the barrel that re-exports
+ * the public surface.
+ */
+
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+// Lazily-imported DatabaseSync class (ESM-safe: we import at module level but
+// only construct when needed, which is fine since node:sqlite is always available
+// in Node 22).
+import { DatabaseSync } from 'node:sqlite';
+
+// Pure constant module (no imports of its own) — safe to pull in here without
+// creating a cycle back through the repo barrel.
+import { MESSAGE_TTL_MS } from './types';
+
+let sqlite: DatabaseSync | null = null;
+
+export function getSqlite(): DatabaseSync {
+  if (sqlite) return sqlite;
+  const DB_PATH = process.env.AEGIS_DB_PATH ?? './data/aegislink.db';
+  mkdirSync(dirname(DB_PATH), { recursive: true });
+  sqlite = new DatabaseSync(DB_PATH);
+  sqlite.exec('PRAGMA journal_mode = WAL;');
+  sqlite.exec('PRAGMA foreign_keys = ON;');
+  initSqliteSchema(sqlite);
+  return sqlite;
+}
+
+/** Close the active SQLite handle and reset module state. Idempotent. */
+export function closeSqlite(): void {
+  try { sqlite?.close(); } catch { /* already closed */ }
+  sqlite = null;
+}
+
+export function initSqliteSchema(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS identities (
+      aegis_id                TEXT PRIMARY KEY,
+      public_key_b64          TEXT NOT NULL,
+      signing_public_key_b64  TEXT NOT NULL DEFAULT '',
+      created_at              INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id             TEXT PRIMARY KEY,
+      recipient      TEXT NOT NULL,
+      ciphertext_b64 TEXT NOT NULL,
+      nonce_b64      TEXT NOT NULL,
+      created_at     INTEGER NOT NULL,
+      expires_at     INTEGER NOT NULL DEFAULT 0,
+      drained_by     TEXT NOT NULL DEFAULT '[]',
+      sender_pub_b64 TEXT,
+      epk_b64        TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_recipient
+      ON messages(recipient, created_at);
+
+    CREATE TABLE IF NOT EXISTS push_tokens (
+      aegis_id    TEXT NOT NULL,
+      expo_token  TEXT NOT NULL,
+      platform    TEXT NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (aegis_id, expo_token)
+    );
+
+    -- iOS VoIP (PushKit) tokens — raw APNs device tokens (hex), NOT Expo tokens.
+    -- Separate from push_tokens: different delivery path (direct APNs HTTP/2,
+    -- apns-push-type: voip) and a different token format.
+    CREATE TABLE IF NOT EXISTS voip_tokens (
+      aegis_id    TEXT NOT NULL,
+      voip_token  TEXT NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (aegis_id, voip_token)
+    );
+
+    -- iOS standard APNs tokens (raw hex device token) for apns-push-type: alert.
+    -- Separate from push_tokens (Expo) and voip_tokens (PushKit): a message wake
+    -- goes DIRECT to APNs with no Expo hop (Session-style). Absent/unconfigured
+    -- -> the Expo visible-push fallback still runs, so nothing regresses.
+    CREATE TABLE IF NOT EXISTS apns_tokens (
+      aegis_id    TEXT NOT NULL,
+      apns_token  TEXT NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (aegis_id, apns_token)
+    );
+
+    -- Sealed-sender (Phase 1): the recipient registers ONLY the hash of their
+    -- delivery token; senders present the raw token to submit a sealed envelope
+    -- without authenticating as a sender. The relay never stores the raw token
+    -- and never learns the sender. See docs/SEALED-SENDER-ARCHITECTURE.md §3.3.
+    CREATE TABLE IF NOT EXISTS delivery_tokens (
+      aegis_id       TEXT PRIMARY KEY,
+      token_hash_b64 TEXT NOT NULL,
+      updated_at     INTEGER NOT NULL
+    );
+
+    -- Slice 2b.3b: UnifiedPush endpoint per (opaque, per-epoch) mailbox id.
+    -- Registered ONLY over an authenticated mailbox socket (possession of the
+    -- mailbox signing key), so knowing a mailbox id is not enough to hijack
+    -- its wake-ups. Rotates with the epoch like the mailbox itself: stale rows
+    -- are purged after PUSH_ENDPOINT_TTL_MS (no stable token survives rotation,
+    -- design constraint R1 in docs/FASE4-SLICE2B-PUSH-DESIGN.md).
+    CREATE TABLE IF NOT EXISTS push_endpoints (
+      mailbox_id TEXT PRIMARY KEY,
+      endpoint   TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    -- Slice 2b.4: Expo/APNs wake token per (per-epoch) mailbox id — the iOS
+    -- app-killed path, where UnifiedPush is impossible. OPT-IN ONLY (flag on
+    -- both sides): a stable push token bound to rotating mailbox ids lets the
+    -- relay re-link epochs, the documented residual reduct of §7.3 (R5 —
+    -- degrade honestly, never silently). Same auth + purge rules as
+    -- push_endpoints: written only over an authenticated mailbox socket,
+    -- purged after 48 h without re-registration.
+    CREATE TABLE IF NOT EXISTS push_mailbox_tokens (
+      mailbox_id TEXT PRIMARY KEY,
+      expo_token TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prekeys_signed (
+      aegis_id       TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT 'default',
+      key_id         INTEGER NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      signature_b64  TEXT NOT NULL,
+      created_at     INTEGER NOT NULL,
+      PRIMARY KEY (aegis_id, device_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS prekeys_onetime (
+      aegis_id       TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT 'default',
+      key_id         INTEGER NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      created_at     INTEGER NOT NULL,
+      PRIMARY KEY (aegis_id, device_id, key_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS prekeys_pq_signed (
+      aegis_id       TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT 'default',
+      key_id         INTEGER NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      signature_b64  TEXT NOT NULL,
+      created_at     INTEGER NOT NULL,
+      PRIMARY KEY (aegis_id, device_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS lightning_invoices (
+      payment_hash  TEXT PRIMARY KEY,
+      bolt11        TEXT NOT NULL,
+      amount_sats   INTEGER NOT NULL,
+      plan_days     INTEGER NOT NULL,
+      created_at    INTEGER NOT NULL,
+      expires_at    INTEGER NOT NULL,
+      paid          INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      payment_hash  TEXT PRIMARY KEY,
+      plan_days     INTEGER NOT NULL,
+      activated_at  INTEGER NOT NULL,
+      expires_at    INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS linked_devices (
+      device_id      TEXT PRIMARY KEY,
+      aegis_id       TEXT NOT NULL,
+      device_pub_key TEXT NOT NULL,
+      device_name    TEXT NOT NULL DEFAULT 'AegisLink Desktop',
+      platform       TEXT NOT NULL DEFAULT 'desktop',
+      linked_at      INTEGER NOT NULL,
+      revoked        INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_linked_devices_aegis
+      ON linked_devices(aegis_id, revoked);
+
+    CREATE TABLE IF NOT EXISTS backups (
+      id_hash    TEXT PRIMARY KEY,
+      envelope   TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sender_key_dist_queue (
+      id              TEXT PRIMARY KEY,
+      recipient       TEXT NOT NULL,
+      group_id        TEXT NOT NULL,
+      sender_aegis_id TEXT NOT NULL,
+      ciphertext_b64  TEXT NOT NULL,
+      nonce_b64       TEXT NOT NULL,
+      iteration       INTEGER NOT NULL,
+      created_at      INTEGER NOT NULL,
+      expires_at      INTEGER NOT NULL,
+      drained_by      TEXT NOT NULL DEFAULT '[]'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_skdq_recipient
+      ON sender_key_dist_queue(recipient, created_at);
+
+    -- AegisLink Work (enterprise orgs/channels) tables were removed from this
+    -- repo (ROADMAP Hito 1, external audit 2026-09-16 AL-02/07/09). Existing
+    -- deployments may still hold orphaned work_* / workspaces* tables: they are
+    -- left untouched (no DROP from application code — golden rule on
+    -- destructive tooling); an operator may drop them by hand.
+
+  `);
+
+  // Schema migrations for existing deployments
+  try { db.exec(`ALTER TABLE identities ADD COLUMN signing_public_key_b64 TEXT NOT NULL DEFAULT '';`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE messages ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE messages DROP COLUMN sender;`); } catch { /* absent */ }
+  // C-3 (security roadmap Ola 2): the SenderKey chain key must never be persisted
+  // by the relay. Drop the legacy plaintext column from existing deployments.
+  try { db.exec(`ALTER TABLE sender_key_dist_queue DROP COLUMN chain_key_b64;`); } catch { /* absent */ }
+  try { db.exec(`ALTER TABLE messages ADD COLUMN drained_by TEXT NOT NULL DEFAULT '[]';`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE messages ADD COLUMN sender_pub_b64 TEXT;`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE messages ADD COLUMN epk_b64 TEXT;`); } catch { /* exists */ }
+  // Drain-storm guard (audit 2026-08-08). A row is deleted only when the client
+  // acks it, so a message the client can NEVER process (ratchet state gone after
+  // a reinstall, permanently undecryptable envelope) is re-emitted on every
+  // single reconnect, forever. The recipient then re-grinds the whole backlog
+  // through the ratchet before the genuinely new message — measured live as a
+  // 10-15 s stall on every iOS cold start (iOS re-connects constantly; Android
+  // keeps the process resident via the call-wake service and so never showed it).
+  // Counting hand-outs lets drainFor drop a poison row after MAX_DELIVERY_ATTEMPTS
+  // without going back to delete-on-emit, which lost messages (see handler.ts).
+  try { db.exec(`ALTER TABLE messages ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;`); } catch { /* exists */ }
+  // Same audit: rows written before the expires_at migration carry 0, and 0 meant
+  // "never expires" to BOTH drainFor and purgeExpired — immortal rows replayed on
+  // every connect for the life of the deployment (730 of them on the live relay).
+  // Backfill the standard TTL from their own created_at so they age out normally.
+  try {
+    db.exec(
+      `UPDATE messages SET expires_at = created_at + ${MESSAGE_TTL_MS} WHERE expires_at = 0;`
+    );
+  } catch { /* table not migrated yet — enqueue() sets the TTL for new rows anyway */ }
+  try { db.exec(`ALTER TABLE prekeys_signed ADD COLUMN device_id TEXT NOT NULL DEFAULT 'default';`); } catch { /* exists */ }
+  // M-2: prekeys_onetime per-device. Old PK was (aegis_id, key_id); SQLite can't
+  // change a PK in place, and OPKs are ephemeral (clients re-upload on reconnect),
+  // so when device_id is absent we drop+recreate with PK (aegis_id, device_id,
+  // key_id). Guarded by PRAGMA so it runs at most once.
+  try {
+    const cols = db.prepare(`PRAGMA table_info(prekeys_onetime)`).all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some((c) => c.name === 'device_id')) {
+      db.exec(`DROP TABLE prekeys_onetime;`);
+      db.exec(`
+        CREATE TABLE prekeys_onetime (
+          aegis_id       TEXT NOT NULL,
+          device_id      TEXT NOT NULL DEFAULT 'default',
+          key_id         INTEGER NOT NULL,
+          public_key_b64 TEXT NOT NULL,
+          created_at     INTEGER NOT NULL,
+          PRIMARY KEY (aegis_id, device_id, key_id)
+        );
+      `);
+    }
+  } catch { /* table absent or already migrated */ }
+  // Backup table — migration guard for existing deployments
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS backups (
+      id_hash    TEXT PRIMARY KEY,
+      envelope   TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );`);
+  } catch { /* exists */ }
+
+}

@@ -1,0 +1,247 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import i18n from '../i18n';
+import type { CSSProperties } from 'react';
+import QRCode from 'qrcode';
+import { useTheme } from '../theme/ThemeContext';
+import { I } from '../components/icons';
+import type { Tab } from '../components/TabBar';
+import { useIdentity } from '../store/identity';
+import { useContacts } from '../store/contacts';
+import type { StoredContact } from '../db/local';
+import { encodeIdentityQR } from '../crypto/qr';
+
+interface Identity {
+  aegisId: string;
+  publicKey: Uint8Array;
+  publicKeyB64: string;
+}
+
+interface Props {
+  onBack: () => void;
+  onScan: () => void;
+  onTab?: (tab: Tab) => void;
+  /** Called when a peer scans this QR and is auto-added as a new contact. */
+  onContactAdded?: (contact: StoredContact) => void;
+}
+
+// Stub fingerprint functions
+function fingerprintWords(key: Uint8Array): string[] {
+  const wordlist = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
+  return wordlist.slice(0, 8);
+}
+function fingerprintHex(key: Uint8Array): string[] {
+  const hex = Array.from(key).map((b) => b.toString(16).padStart(2, '0')).join('');
+  const padded = hex.padEnd(32, '0').slice(0, 32);
+  return [padded.slice(0, 4), padded.slice(4, 8), padded.slice(8, 12), padded.slice(12, 16),
+          padded.slice(16, 20), padded.slice(20, 24), padded.slice(24, 28), padded.slice(28, 32)].map((s) => s.toUpperCase());
+}
+
+export function VerifyScreen({ onBack, onScan, onTab, onContactAdded }: Props) {
+  useTranslation(); // re-render on language change
+  const { t } = useTheme();
+  const asTab = !!onTab;
+
+  const storedIdentity = useIdentity((s) => s.identity);
+  const contacts = useContacts((s) => s.contacts);
+
+  const identity = useMemo<Identity | null>(() => {
+    if (!storedIdentity) return null;
+    const raw = storedIdentity as { aegisId: string; publicKeyB64: string };
+    const publicKey = Uint8Array.from(atob(raw.publicKeyB64), c => c.charCodeAt(0));
+    return { aegisId: raw.aegisId, publicKey, publicKeyB64: raw.publicKeyB64 };
+  }, [storedIdentity]);
+
+  // When a peer scans our QR → they get auto-added as a contact by the socket
+  // handler. Detect that here and navigate to chat with them.
+  const prevCountRef = useRef(contacts.length);
+  useEffect(() => {
+    const prev = prevCountRef.current;
+    prevCountRef.current = contacts.length;
+    if (contacts.length > prev) {
+      // The newest contact is always prepended at index 0.
+      const newest = contacts[0];
+      if (newest) {
+        if (onContactAdded) {
+          onContactAdded(newest);
+        } else if (onTab) {
+          onTab('home');
+        } else {
+          onBack();
+        }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contacts.length]);
+
+  const [copyMsg, setCopyMsg] = useState<string | null>(null);
+  const [shareMsg, setShareMsg] = useState<string | null>(null);
+
+  const words = useMemo(() => identity ? fingerprintWords(identity.publicKey) : [], [identity]);
+  const hex   = useMemo(() => identity ? fingerprintHex(identity.publicKey)   : [], [identity]);
+
+  const qrPayload = identity ? encodeIdentityQR(identity.aegisId, identity.publicKeyB64) : '';
+
+  async function handleCopyId() {
+    if (!identity) return;
+    try {
+      await navigator.clipboard.writeText(identity.aegisId);
+      setCopyMsg(i18n.t('verify.aegislinkIdCopied'));
+      setTimeout(() => setCopyMsg(null), 2000);
+    } catch {
+      setCopyMsg(i18n.t('verify.copyFailedUseCtrl'));
+      setTimeout(() => setCopyMsg(null), 2000);
+    }
+  }
+
+  async function handleShareContact() {
+    if (!identity) return;
+    const shareText = `Agregame en AegisLink:\naegislink://v1/${identity.aegisId}/${encodeURIComponent(identity.publicKeyB64)}\n\nO usa mi ID: ${identity.aegisId}`;
+    try {
+      await navigator.clipboard.writeText(shareText);
+      setShareMsg('¡Copiado!');
+      setTimeout(() => setShareMsg(null), 2000);
+    } catch {
+      setShareMsg(i18n.t('verify.copyFailed'));
+      setTimeout(() => setShareMsg(null), 2000);
+    }
+  }
+
+  async function handleCopyQR() {
+    try {
+      await navigator.clipboard.writeText(qrPayload);
+      setCopyMsg(i18n.t('verify.qrPayloadCopied'));
+      setTimeout(() => setCopyMsg(null), 2000);
+    } catch {
+      setCopyMsg(i18n.t('verify.copyFailed'));
+      setTimeout(() => setCopyMsg(null), 2000);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, height: '100%', backgroundColor: t.bg }}>
+      {/* Header */}
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', paddingLeft: 14, paddingRight: 14, paddingTop: 10, paddingBottom: 10 }}>
+        {asTab ? (
+          <div style={{ width: 22 }} />
+        ) : (
+          <button onClick={onBack} aria-label={i18n.t('common.back')} style={iconBtn}>
+            <I.ChevronL size={22} color={t.text} />
+          </button>
+        )}
+        <span style={{ flex: 1, textAlign: 'center', fontFamily: t.fontDisplay, fontSize: asTab ? 24 : 17, fontWeight: '600', color: t.text, letterSpacing: -0.4 }}>{i18n.t('verify.title')}</span>
+        <div style={{ width: 22 }} />
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', paddingLeft: 22, paddingRight: 22, paddingBottom: 40 }}>
+        <p style={{ fontFamily: t.font, fontSize: 14, color: t.textDim, textAlign: 'center', lineHeight: '21px', margin: '12px 0', maxWidth: 320 }}>
+          Show this QR to your peer in person, or read the 8 safety words aloud. Matching = no one's in the middle.
+        </p>
+
+        {/* QR display — desktop shows payload text in a styled box */}
+        <div style={{ padding: 20, backgroundColor: t.surface, borderRadius: t.radius, border: `1px solid ${t.borderStrong}`, marginTop: 6, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, width: '100%', maxWidth: 280, boxSizing: 'border-box' }}>
+          {/* Real QR code */}
+          <QRCanvas payload={qrPayload} t={t} />
+          <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textFaint, letterSpacing: 0.5, textAlign: 'center', wordBreak: 'break-all' }}>
+            {qrPayload.slice(0, 40)}…
+          </span>
+          <button onClick={handleCopyQR} aria-label={i18n.t('verify.copyQrPayload')} style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, border: `1px solid ${t.borderStrong}`, borderRadius: t.radiusS, paddingLeft: 12, paddingRight: 12, paddingTop: 6, paddingBottom: 6, backgroundColor: 'transparent', cursor: 'pointer' }}>
+            <I.Copy size={14} color={t.textDim} />
+            <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textDim, letterSpacing: 0.5 }}>{i18n.t('verify.copyQrData')}</span>
+          </button>
+        </div>
+
+        {/* Share contact link button */}
+        <button
+          onClick={() => void handleShareContact()}
+          aria-label={i18n.t('verify.copiarLinkDeContacto')}
+          style={{ marginTop: 14, display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, border: `1px solid ${t.borderStrong}`, borderRadius: t.radiusS, paddingLeft: 16, paddingRight: 16, paddingTop: 9, paddingBottom: 9, backgroundColor: 'transparent', cursor: 'pointer' }}
+        >
+          <I.Copy size={15} color={t.textDim} />
+          <span style={{ fontFamily: t.fontMono, fontSize: 11, color: t.textDim, letterSpacing: 0.5 }}>
+            {shareMsg ?? 'COPIAR LINK DE CONTACTO'}
+          </span>
+        </button>
+
+        {/* AegisLink ID */}
+        <div style={{ marginTop: 18, display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontFamily: t.fontMono, fontSize: 14, color: t.text, letterSpacing: 0.6 }}>
+            {identity?.aegisId ?? '—'}
+          </span>
+          <button onClick={() => void handleCopyId()} aria-label={i18n.t('verify.copyAegislinkId')} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}>
+            <I.Copy size={16} color={t.accent} />
+          </button>
+        </div>
+
+        {copyMsg && (
+          <div style={{ marginTop: 8, paddingLeft: 12, paddingRight: 12, paddingTop: 6, paddingBottom: 6, backgroundColor: `${t.accent}22`, borderRadius: 99 }}>
+            <span style={{ fontFamily: t.fontMono, fontSize: 11, color: t.accent }}>{copyMsg}</span>
+          </div>
+        )}
+
+        {/* Safety words */}
+        <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textDim, letterSpacing: 1.2, marginTop: 24, marginBottom: 10, display: 'block' }}>{i18n.t('verify.orWords')}</span>
+
+        <div style={{ width: '100%', maxWidth: 320, border: `1px solid ${t.borderStrong}`, borderRadius: t.radius, padding: 14, backgroundColor: t.surface, boxSizing: 'border-box' }}>
+          <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {words.map((w, i) => (
+              <div key={i} style={{ width: 'calc(50% - 4px)', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 8, paddingRight: 8, paddingTop: 6, paddingBottom: 6, backgroundColor: t.surface2, borderRadius: t.radiusS, boxSizing: 'border-box' }}>
+                <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textFaint, width: 14, flexShrink: 0 }}>
+                  {(i + 1).toString().padStart(2, '0')}
+                </span>
+                <span style={{ fontFamily: t.fontMono, fontSize: 14, color: t.text, fontWeight: '500' }}>{w}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Hex fingerprint */}
+        <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textDim, letterSpacing: 1.2, marginTop: 20, marginBottom: 10, display: 'block' }}>{i18n.t('verify.orHexFingerprint')}</span>
+        <div style={{ width: '100%', maxWidth: 320, padding: 14, backgroundColor: t.surface, borderRadius: t.radius, border: `1px solid ${t.borderStrong}`, boxSizing: 'border-box' }}>
+          <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {hex.map((h, i) => (
+              <div key={i} style={{ paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4, backgroundColor: t.surface2, borderRadius: t.radiusS }}>
+                <span style={{ fontFamily: t.fontMono, fontSize: 13, color: t.text }}>{h}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Security note */}
+        <div style={{ width: '100%', maxWidth: 320, marginTop: 20, padding: 14, backgroundColor: `${t.accent}11`, border: `1px solid ${t.accent}33`, borderRadius: t.radius, boxSizing: 'border-box' }}>
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+            <I.Shield size={16} color={t.accent} />
+            <p style={{ fontFamily: t.font, fontSize: 12, color: t.textDim, lineHeight: '18px', margin: 0 }}>{i18n.t('verify.aegislinkUsesX3dhDouble')}</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+// Real scannable QR code using the `qrcode` library
+function QRCanvas({ payload, t }: { payload: string; t: { radius: number } }) {
+  useTranslation(); // re-render on language change
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!canvasRef.current || !payload) return;
+    void QRCode.toCanvas(canvasRef.current, payload, {
+      width: 176,
+      margin: 1,
+      color: { dark: '#000000', light: '#ffffff' },
+    });
+  }, [payload]);
+
+  return (
+    <div style={{ width: 176, height: 176, borderRadius: t.radius, overflow: 'hidden', flexShrink: 0 }}>
+      <canvas ref={canvasRef} style={{ display: 'block' }} />
+    </div>
+  );
+}
+
+const iconBtn: CSSProperties = {
+  padding: 6, background: 'none', border: 'none', cursor: 'pointer',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+};

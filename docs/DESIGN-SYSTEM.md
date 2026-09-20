@@ -1,9 +1,9 @@
 # AegisLink Work — Sistema de diseño
 
 > **Estado:** ✅ Tokens v1 definidos (2026-09-19) en `prototype/theme.jsx` (`WORK`, `WORK_LIGHT`).
-> **Doc canónico** de tema, tokens y componentes (mapa en `CLAUDE.md`). Los tokens se portan a
-> `mobile/src/theme/` y `desktop/src/renderer/theme/` en la fase 2 **desde este doc**; si el
-> código y esta tabla discrepan, se corrige en la misma PR.
+> **Doc canónico** de tema, tokens y componentes (mapa en `CLAUDE.md`). Los tokens viven en
+> `mobile/src/theme/vault.ts` y `desktop/src/renderer/theme/vault.ts` (tema `Work`, fase 2, PR #3);
+> si el código y esta tabla discrepan, se corrige en la misma PR.
 
 ## 1. Decisión
 
@@ -58,8 +58,15 @@ plataforma, estado, fingerprint), `PolicyChip` ("Retención 30 d · política de
 
 ## 5. Iconografía y marca
 
-- Icono de app propio `icon-work` (variante del escudo con fondo púrpura `#5b3bb8`→`#8b5cf6`);
-  bundle id `com.aegislink.work`. Fuente: `prototype/App Icons.html` (variante "Work").
+- Icono de app: el mismo AegisMark (escudo + dos barras) que el personal, con identidad púrpura
+  Work — marca `#8b5cf6` sobre fondo `#0b0a12` con halo púrpura (principal), `#6d28d9` sobre
+  `#f4f2f9` (alternativo claro), gris sobre `#14161c` (alternativo *tinted*). Un solo dibujo en
+  toda la marca: en la app el escudo se pinta con `t.accent`, y el icono es ese mismo escudo.
+  Fuente única: `mobile/assets/icons/*.svg` (`README.md` ahí explica la regeneración con
+  `scripts/gen-icons.mjs` + `gen-icons.js`); `desktop/assets/icon.svg` es copia de `icon-dark.svg`
+  y `desktop/scripts/gen-icon.mjs` produce `icon.png`/`icon.ico`. Splash, favicon y el icono de
+  notificación (silueta blanca, tintada por Android con `#8b5cf6`) salen del mismo SVG.
+  Bundle id `com.aegislink.work`. Hecho en la fase 2 (PR #3).
 - Logo: mismo trazo, `logoStroke = accent`.
 - Nombre en UI: **AegisLink Work** (nunca "AegisLink" a secas dentro de la app Work).
 

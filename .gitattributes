@@ -1,0 +1,12 @@
+# Normalize line endings: the repo is LF; Windows checkouts get LF too.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.jar binary
+*.keystore binary
+*.p12 binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.wav binary

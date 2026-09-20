@@ -5,6 +5,10 @@
 > `SECURITY-ROADMAP-2026-06.md` olas 1-12, `PROTOCOL.md` §8, `SEALED-SENDER-ARCHITECTURE.md`)
 > y cómo la hereda o la sustituye Work. Una fila `⏳` no se cierra sin su test y su PR enlazados.
 > `qa-lead` verifica esta tabla contra el código al cierre de las fases 2, 3 y 4.
+>
+> **Fase 2 (PR #3):** las filas 🟢 entraron con la semilla tal cual, con las mismas suites del
+> personal corriendo en CI (`server-test`, `mobile-test`, `desktop-test`). Las filas 🟡/🆕/⏳ siguen
+> abiertas hasta su fase.
 
 Leyenda: 🟢 se hereda tal cual en la semilla (fase 2) · 🟡 se hereda con adaptación · 🆕 nueva
 en Work · ⛔ no aplica (con motivo) · ⏳ pendiente.

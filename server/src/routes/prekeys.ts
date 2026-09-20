@@ -1,0 +1,230 @@
+import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
+import nacl from 'tweetnacl';
+import tweetnaclUtil from 'tweetnacl-util';
+const { decodeBase64 } = tweetnaclUtil;
+import { z } from 'zod';
+import { identityRepo, prekeysRepo, type SignedPreKeyRow } from '../db/client.js';
+
+const router = Router();
+
+const AEGIS_ID_RE = /^[0-9A-HJKMNP-TV-Z]{3}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
+
+// ── Rate limiter (20 requests per 10 minutes per IP) ──────────────────────────
+const uploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ error: 'rate_limit_exceeded', retryAfterMs: 10 * 60 * 1000 });
+  },
+});
+
+// ── Schemas ───────────────────────────────────────────────────────────────────
+
+const UploadBody = z.object({
+  aegisId: z.string().regex(AEGIS_ID_RE, 'invalid Aegis ID format'),
+  /**
+   * Optional device identifier. Callers should supply a stable UUID that
+   * uniquely identifies this installation. Defaults to 'default' for backward
+   * compatibility with single-device clients.
+   */
+  deviceId: z.string().min(1).max(128).optional(),
+  sig: z.string().min(1),
+  ts: z.number().int().positive(),
+  signedPreKey: z.object({
+    keyId: z.number().int().nonnegative(),
+    publicKeyB64: z.string().min(1).max(128),
+    signatureB64: z.string().min(1).max(256),
+  }),
+  oneTimePreKeys: z
+    .array(
+      z.object({
+        keyId: z.number().int().nonnegative(),
+        publicKeyB64: z.string().min(1).max(128),
+      })
+    )
+    .max(100),
+  /**
+   * PQXDH (v2): optional signed PQ prekey (ML-KEM-768). Optional/nullable so
+   * legacy v1 clients keep working unchanged (interop requirement). Sizes
+   * (base64): publicKeyB64 ~1184 bytes raw, signatureB64 64 bytes raw.
+   */
+  pqSignedPreKey: z
+    .object({
+      keyId: z.number().int().nonnegative(),
+      publicKeyB64: z.string().min(1).max(2048),
+      signatureB64: z.string().min(1).max(128),
+    })
+    .optional(),
+});
+
+// ── POST /prekeys ─────────────────────────────────────────────────────────────
+/**
+ * Upload or refresh prekeys for an identity.
+ *
+ * Auth: requires a valid Ed25519 signature over `${aegisId}:prekeys:${timeBucket}`
+ * where timeBucket = Math.floor(ts / 30_000). The `ts` field must be within
+ * ±60 seconds of server time.
+ *
+ * Body: { aegisId, sig, ts, signedPreKey: { keyId, publicKeyB64, signatureB64 },
+ *         oneTimePreKeys: [{ keyId, publicKeyB64 }, ...] }
+ * Response 201: { uploaded: N }
+ */
+router.post('/', uploadLimiter, async (req, res) => {
+  const parsed = UploadBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_body', issues: parsed.error.issues });
+    return;
+  }
+
+  const { aegisId, deviceId, sig, ts, signedPreKey, oneTimePreKeys, pqSignedPreKey } = parsed.data;
+
+  // Validate timestamp within ±60 seconds.
+  if (Math.abs(Date.now() - ts) > 60_000) {
+    res.status(400).json({ error: 'timestamp_out_of_range' });
+    return;
+  }
+
+  // Identity must exist and have a signing key.
+  const identity = await identityRepo.get(aegisId);
+  if (!identity || !identity.signing_public_key_b64) {
+    res.status(403).json({ error: 'identity_not_found_or_no_signing_key' });
+    return;
+  }
+
+  // Verify Ed25519 signature.
+  let pubKeyBytes: Uint8Array;
+  let sigBytes: Uint8Array;
+  try {
+    pubKeyBytes = decodeBase64(identity.signing_public_key_b64);
+    sigBytes = decodeBase64(sig);
+  } catch {
+    res.status(403).json({ error: 'invalid_signature' });
+    return;
+  }
+
+  const timeBucket = Math.floor(ts / 30_000);
+  const encode = (bucket: number) =>
+    new TextEncoder().encode(`${aegisId}:prekeys:${bucket}`);
+
+  const valid =
+    nacl.sign.detached.verify(encode(timeBucket), sigBytes, pubKeyBytes) ||
+    nacl.sign.detached.verify(encode(timeBucket - 1), sigBytes, pubKeyBytes);
+
+  if (!valid) {
+    res.status(403).json({ error: 'invalid_signature' });
+    return;
+  }
+
+  // PQXDH (v2): verify the Ed25519 signature over the PQ signed prekey the SAME
+  // way as the classic SPK above — defence in depth against DB tampering. The
+  // server never inspects the ML-KEM public key itself beyond this signature
+  // check. Optional field: absent ⇒ this upload stays v1-only.
+  if (pqSignedPreKey) {
+    let pqPubKeyBytes: Uint8Array;
+    let pqSigBytes: Uint8Array;
+    try {
+      pqPubKeyBytes = decodeBase64(pqSignedPreKey.publicKeyB64);
+      pqSigBytes = decodeBase64(pqSignedPreKey.signatureB64);
+    } catch {
+      res.status(403).json({ error: 'invalid_pq_spk_signature' });
+      return;
+    }
+    if (!nacl.sign.detached.verify(pqPubKeyBytes, pqSigBytes, pubKeyBytes)) {
+      res.status(403).json({ error: 'invalid_pq_spk_signature' });
+      return;
+    }
+  }
+
+  const now = Date.now();
+
+  try {
+    const spkRow: SignedPreKeyRow = {
+      aegis_id: aegisId,
+      device_id: deviceId ?? 'default',
+      key_id: signedPreKey.keyId,
+      public_key_b64: signedPreKey.publicKeyB64,
+      signature_b64: signedPreKey.signatureB64,
+      created_at: now,
+    };
+    await prekeysRepo.upsertSigned(spkRow);
+
+    if (pqSignedPreKey) {
+      await prekeysRepo.upsertPqSigned({
+        aegis_id: aegisId,
+        device_id: deviceId ?? 'default',
+        key_id: pqSignedPreKey.keyId,
+        public_key_b64: pqSignedPreKey.publicKeyB64,
+        signature_b64: pqSignedPreKey.signatureB64,
+        created_at: now,
+      });
+    }
+
+    let uploaded = 0;
+    for (const opk of oneTimePreKeys) {
+      await prekeysRepo.insertOneTime({
+        aegis_id: aegisId,
+        device_id: deviceId ?? 'default', // M-2: OPKs are per-device, like the SPK above
+        key_id: opk.keyId,
+        public_key_b64: opk.publicKeyB64,
+        created_at: now,
+      });
+      uploaded++;
+    }
+
+    res.status(201).json({ uploaded });
+  } catch (err) {
+    // Log only the error name, never the message — an interpolated SQLite error
+    // can echo malformed input (pubkeys, aegisIds) into logs (cero-metadatos).
+    console.error('[prekeys] upload db_error:', (err as Error).name);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+// ── GET /bundle/:aegisId ──────────────────────────────────────────────────────
+/**
+ * Fetch X3DH prekey bundles for a contact — one per registered device.
+ *
+ * One-time prekeys (OPKs) are consumed atomically per device. If no OPKs
+ * remain for a device, `oneTimePreKey` is null; X3DH continues to work with
+ * slightly weaker forward secrecy but the session is still E2EE.
+ *
+ * Response 200:
+ *   {
+ *     bundles: Array<{
+ *       device_id: string,
+ *       signingPublicKeyB64: string,
+ *       signedPreKey: { keyId, publicKeyB64, signatureB64 },
+ *       oneTimePreKey: { keyId, publicKeyB64 } | null
+ *     }>,
+ *     // backward compat: first bundle also exposed as top-level `bundle` field
+ *     bundle: { ... } | null
+ *   }
+ */
+router.get('/bundle/:aegisId', async (req, res) => {
+  const { aegisId } = req.params;
+
+  if (!AEGIS_ID_RE.test(aegisId)) {
+    res.status(400).json({ error: 'invalid_id_format' });
+    return;
+  }
+
+  try {
+    const bundles = await prekeysRepo.getBundles(aegisId);
+    if (bundles.length === 0) {
+      res.status(404).json({ error: 'bundle_not_found' });
+      return;
+    }
+
+    // `bundle` (singular) is kept for backward compatibility with older clients
+    // that expect the original flat object shape.
+    const bundle = bundles[0] ?? null;
+    res.json({ bundles, bundle });
+  } catch (_err) {
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+export default router;

@@ -1,0 +1,609 @@
+/**
+ * AegisLink Desktop — WebRTC call signaling (Electron renderer).
+ *
+ * Ported from mobile/src/socket/calls.ts.
+ * Changes vs. mobile:
+ *  - react-native-webrtc → native browser RTCPeerConnection / getUserMedia (Chromium)
+ *  - expo-crypto.randomUUID() → crypto.randomUUID() (Web Crypto API)
+ *  - require('../webrtc/peer') → inline browser WebRTC (no native module abstraction needed)
+ *  - __DEV__ → import.meta.env.DEV
+ *  - Dynamic require() stores → static imports
+ *
+ * WebRTC in Electron renderer: RTCPeerConnection, RTCSessionDescription,
+ * RTCIceCandidate, and navigator.mediaDevices.getUserMedia are all native
+ * Chromium APIs — no polyfill required.
+ */
+
+import { logger } from '../utils/logger';
+import { getSocket, isConnected } from './client';
+import { useCall } from '../store/call';
+import { saveCall } from '../db/local';
+import { useMessages } from '../store/messages';
+import { useIdentity } from '../store/identity';
+import { useContacts } from '../store/contacts';
+import { TOR_RELAY } from '../config';
+import { homeRelayBaseUrl } from '../net/homeRelay';
+import nacl from 'tweetnacl';
+import { decodeBase64, encodeBase64, decodeUTF8 } from 'tweetnacl-util';
+import {
+  sealCallInvite,
+  openCallInvite,
+  sealWithCallKey,
+  openWithCallKey,
+} from '../crypto/callSession';
+import { onCallSignal, routeCallSignal } from './callSignalRouter';
+
+const DEV = import.meta.env.DEV;
+
+export type CallMedia = 'audio' | 'video';
+
+// ── ICE config ────────────────────────────────────────────────────────────────
+
+interface RTCConfigShape {
+  iceServers: { urls: string | string[]; username?: string; credential?: string }[];
+  iceTransportPolicy?: 'all' | 'relay';
+}
+
+/**
+ * Derive a `stun:` URL from our own TURN URL (same host+port). coturn serves STUN
+ * on the TURN port, so this yields server-reflexive candidates from OUR server —
+ * never a third party. Returns null for an empty/malformed TURN URL.
+ */
+function deriveStunUrl(turnUrl: string): string | null {
+  const noQuery = turnUrl.split('?')[0];
+  const m = /^turns?:(.+)$/.exec(noQuery);
+  return m ? `stun:${m[1]}` : null;
+}
+
+function defaultRtcConfig(): RTCConfigShape {
+  const TURN_URL = (import.meta.env.VITE_TURN_URL as string | undefined) ?? '';
+  const TURN_USERNAME = (import.meta.env.VITE_TURN_USERNAME as string | undefined) ?? '';
+  const TURN_PASSWORD = (import.meta.env.VITE_TURN_PASSWORD as string | undefined) ?? '';
+
+  // ZERO third-party STUN: querying public STUN (Google/Cloudflare) would leak
+  // "this AegisLink user is calling now, from this IP" to an outside party. Our
+  // coturn serves STUN on the same host/port as TURN, so derive a stun: entry from
+  // TURN_URL. No TURN configured → no STUN entry (host candidates only), never a
+  // public fallback. Parity with mobile/src/webrtc/ice.ts.
+  const iceServers: RTCConfigShape['iceServers'] = [];
+  const stunUrl = TURN_URL ? deriveStunUrl(TURN_URL) : null;
+  if (stunUrl) iceServers.push({ urls: [stunUrl] });
+  if (TURN_URL) {
+    iceServers.push({ urls: TURN_URL, username: TURN_USERNAME, credential: TURN_PASSWORD });
+  }
+  return torRtcPolicy({ iceServers });
+}
+
+/**
+ * Tor always-on: main sets Chromium's WebRTC IP handling to
+ * `disable_non_proxied_udp`, so only TURN-over-TCP/TLS via the SOCKS proxy can
+ * carry media. Force relay-only so no host/srflx candidate (our LAN/public IP)
+ * is ever written into the SDP handed to the peer — the peer must not learn
+ * our IP either. Media latency is higher over Tor; privacy is the product.
+ */
+function torRtcPolicy(cfg: RTCConfigShape): RTCConfigShape {
+  return TOR_RELAY ? { ...cfg, iceTransportPolicy: 'relay' } : cfg;
+}
+
+async function fetchTurnConfig(_aegisId: string): Promise<RTCConfigShape> {
+  // A-7 auth (parity with mobile): minting TURN credentials requires proof of a
+  // registered identity. Sign `${aegisId}:turn:${timeBucket}` with the ACTIVE
+  // identity's Ed25519 key (the authoritative signer, read from the store), like
+  // POST /prekeys. No identity → no creds (STUN-only fallback).
+  const id = useIdentity.getState().identity;
+  if (!id?.signingSecretKey) return defaultRtcConfig();
+  const ts = Date.now();
+  const bucket = Math.floor(ts / 30_000);
+  const sig = encodeBase64(
+    nacl.sign.detached(decodeUTF8(`${id.aegisId}:turn:${bucket}`), id.signingSecretKey),
+  );
+  try {
+    const query =
+      `aegisId=${encodeURIComponent(id.aegisId)}` +
+      `&sig=${encodeURIComponent(sig)}` +
+      `&ts=${ts}`;
+    const res = await fetch(
+      `${homeRelayBaseUrl()}/turn/credentials?${query}`, // F5: OUR home's TURN
+      { signal: AbortSignal.timeout(3000) },
+    );
+    if (!res.ok) return defaultRtcConfig();
+    // Server returns { urls, username, credential, ttl }. The `urls` array now
+    // includes our OWN stun: URL (same coturn host) — no third-party STUN ever.
+    // Accept the legacy `password` alias too for older relays.
+    const { username, credential, password, urls: turnUrls } = (await res.json()) as {
+      username: string;
+      credential?: string;
+      password?: string;
+      urls?: string[];
+      ttl: number;
+    };
+    const cred = credential ?? password ?? '';
+    const TURN_URL = (import.meta.env.VITE_TURN_URL as string | undefined) ?? '';
+    // Prefer the server-supplied urls (include UDP+TCP+TLS TURN and our stun:).
+    // Fall back to the static TURN_URL if the relay didn't return urls.
+    const resolvedUrls: string[] = (turnUrls && turnUrls.length > 0)
+      ? turnUrls
+      : (TURN_URL ? [TURN_URL] : []);
+    const iceServers: RTCConfigShape['iceServers'] = [];
+    if (resolvedUrls.length > 0) {
+      iceServers.push({ urls: resolvedUrls, username, credential: cred });
+    }
+    // If the server didn't advertise a stun: URL (older relay or TURN_URL
+    // fallback), derive one from our TURN host — never a public STUN. Parity with
+    // mobile/src/webrtc/ice.ts.
+    if (!resolvedUrls.some((u) => u.startsWith('stun:'))) {
+      const stunUrl = TURN_URL ? deriveStunUrl(TURN_URL) : null;
+      if (stunUrl) iceServers.unshift({ urls: [stunUrl] });
+    }
+    return torRtcPolicy({ iceServers });
+  } catch {
+    return defaultRtcConfig();
+  }
+}
+
+// ── Browser WebRTC peer helpers ───────────────────────────────────────────────
+
+interface ActivePeer {
+  pc: RTCPeerConnection;
+  localStream: MediaStream | null;
+  remoteStream: MediaStream | null;
+  cleanup: () => void;
+}
+
+interface PeerHandlers {
+  onLocalStream: (s: MediaStream) => void;
+  onRemoteStream: (s: MediaStream) => void;
+  onIceCandidate: (c: RTCIceCandidate) => void;
+  onConnectionStateChange: (state: string) => void;
+}
+
+async function createPeer(
+  media: CallMedia,
+  handlers: PeerHandlers,
+  config: RTCConfigShape,
+): Promise<ActivePeer> {
+  const pc = new RTCPeerConnection(config as RTCConfiguration);
+
+  const constraints: MediaStreamConstraints =
+    media === 'video'
+      ? { audio: true, video: { facingMode: 'user' } }
+      : { audio: true, video: false };
+
+  const localStream = await navigator.mediaDevices.getUserMedia(constraints);
+  for (const track of localStream.getTracks()) {
+    pc.addTrack(track, localStream);
+  }
+  handlers.onLocalStream(localStream);
+
+  let remoteStream: MediaStream | null = null;
+  pc.addEventListener('track', (event: RTCTrackEvent) => {
+    if (event.streams?.[0]) {
+      remoteStream = event.streams[0];
+      handlers.onRemoteStream(remoteStream);
+    }
+  });
+
+  pc.addEventListener('icecandidate', (event: RTCPeerConnectionIceEvent) => {
+    if (event.candidate) handlers.onIceCandidate(event.candidate);
+  });
+
+  pc.addEventListener('connectionstatechange', () => {
+    handlers.onConnectionStateChange(pc.connectionState);
+  });
+
+  const cleanup = () => {
+    try { for (const t of localStream.getTracks()) t.stop(); } catch {/* ignore */}
+    try { pc.close(); } catch {/* ignore */}
+  };
+
+  return { pc, localStream, remoteStream, cleanup };
+}
+
+async function createOffer(pc: RTCPeerConnection): Promise<string> {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  return JSON.stringify(offer);
+}
+
+async function setRemoteOffer(pc: RTCPeerConnection, offerSdp: string): Promise<void> {
+  const offer = new RTCSessionDescription(JSON.parse(offerSdp) as RTCSessionDescriptionInit);
+  await pc.setRemoteDescription(offer);
+}
+
+async function createAnswer(pc: RTCPeerConnection): Promise<string> {
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  return JSON.stringify(answer);
+}
+
+async function setRemoteAnswer(pc: RTCPeerConnection, answerSdp: string): Promise<void> {
+  const answer = new RTCSessionDescription(JSON.parse(answerSdp) as RTCSessionDescriptionInit);
+  await pc.setRemoteDescription(answer);
+}
+
+async function addRemoteIce(pc: RTCPeerConnection, candidate: string): Promise<void> {
+  try {
+    const ice = new RTCIceCandidate(JSON.parse(candidate) as RTCIceCandidateInit);
+    await pc.addIceCandidate(ice);
+  } catch (e) {
+    if (DEV) logger.warn('[webrtc] addIceCandidate failed', (e as Error).message);
+  }
+}
+
+// ── Ring timeout ──────────────────────────────────────────────────────────────
+let _ringTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function clearRingTimeout(): void {
+  if (_ringTimeout !== null) {
+    clearTimeout(_ringTimeout);
+    _ringTimeout = null;
+  }
+}
+
+// ── Sealed-sender v2 call signaling (v2-only, Fase C) ───────────────────────
+// Parity with mobile. The caller's identity is sealed inside the invite
+// ciphertext (ephemeral box + Ed25519 sig) and recovered only by the callee.
+// The relay NEVER sees who calls whom. Post-handshake signaling (answer, ICE)
+// is sealed symmetrically under a per-call `callKey` established by the invite.
+const callKeys = new Map<string, Uint8Array>();
+function rememberCallKey(callId: string, key: Uint8Array): void { callKeys.set(callId, key); }
+function forgetCallKey(callId: string): void {
+  const k = callKeys.get(callId);
+  if (k) { k.fill(0); callKeys.delete(callId); }
+}
+
+function ownSealedKeys(): { secretKey: Uint8Array; signingSecretKey: Uint8Array; aegisId: string } | null {
+  const id = useIdentity.getState().identity;
+  if (!id?.signingSecretKey) return null;
+  return { secretKey: id.secretKey, signingSecretKey: id.signingSecretKey, aegisId: id.aegisId };
+}
+function peerBoxKey(aegisId: string): Uint8Array | null {
+  const b64 = useContacts.getState().get(aegisId)?.publicKeyB64;
+  if (!b64) return null;
+  try { const k = decodeBase64(b64); return k.length === nacl.box.publicKeyLength ? k : null; } catch { return null; }
+}
+function peerSigningKey(aegisId: string): Uint8Array | null {
+  const b64 = useContacts.getState().get(aegisId)?.signingPublicKeyB64;
+  if (!b64) return null;
+  try { const k = decodeBase64(b64); return k.length === nacl.sign.publicKeyLength ? k : null; } catch { return null; }
+}
+
+/**
+ * Emit answer / ICE on the v2 symmetric channel. Returns false if no callKey
+ * is held (fail-closed: never fall back to plaintext or v1).
+ */
+function emitCallSignal(
+  socket: NonNullable<ReturnType<typeof getSocket>>,
+  kind: 'answer' | 'ice',
+  callId: string,
+  toAegisId: string,
+  payload: string,
+): boolean {
+  const key = callKeys.get(callId);
+  if (!key) return false; // fail-closed: no callKey → cannot seal (golden rule #6)
+  const wire = sealWithCallKey(key, payload);
+  // Federation F4: a peer on another relay gets the same sealed wire inside the
+  // E2EE channel through THEIR relay (callSignalRouter); local peers as before.
+  return routeCallSignal(socket, `call:${kind}:v2`, toAegisId, { callId, ...wire });
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Subscribes to incoming-call signaling events (v2-only, sealed-sender).
+ * Call this once after the socket authenticates (auth:ok).
+ * The relay NEVER sees who is calling whom.
+ */
+export function attachCallHandlers(): void {
+  const socket = getSocket();
+  if (!socket) return;
+
+  socket.off('call:invite:v2'); socket.off('call:answer:v2'); socket.off('call:ice:v2'); socket.off('call:hangup:v2');
+
+  // Legacy v1 call:invite receive listener REMOVED in Fase C — calls are
+  // unconditionally v2-only (no SEALED_TRANSPORT_VERSION guard). Parity with
+  // mobile/src/socket/calls.ts; the relay no longer emits v1 events.
+  // Sealed-sender v2 invite: no `from`; openCallInvite authenticates the caller
+  // and yields the per-call key.
+  // Handlers are registered on the socket AND in the sealed dispatch table
+  // (federation F4, parity with mobile): the same event may arrive as a
+  // `call_signal` E2EE message from a contact on another relay, in which case
+  // `from` is the authenticated sealed-sender and MUST agree with the identity
+  // sealed inside / the call's peer.
+  onCallSignal(socket, 'call:invite:v2', async (raw: unknown, from?: string) => {
+    const msg = raw as SealedInviteWire;
+    if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string' || typeof msg.epk !== 'string') return;
+    const me = ownSealedKeys();
+    if (!me) return;
+    const opened = openCallInvite(
+      { ciphertext: msg.ciphertext, nonce: msg.nonce, epk: msg.epk },
+      me.secretKey,
+      peerSigningKey,
+      Date.now(),
+    );
+    if (!opened) {
+      if (DEV) logger.warn('[calls] call:invite:v2 open/auth failed — dropping');
+      return;
+    }
+    if (from !== undefined && opened.from !== from) return; // sealed path: caller ≠ sender
+    rememberCallKey(msg.callId, opened.callKey);
+    processIncomingInvite(socket, opened.from, msg.callId, msg.media, opened.offer);
+  });
+
+  onCallSignal(socket, 'call:answer:v2', async (raw: unknown, from?: string) => {
+    const msg = raw as SealedKeyWire;
+    if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+    if (from !== undefined && useCall.getState().peer !== from) return;
+    const key = callKeys.get(msg.callId);
+    if (!key) return;
+    const answer = openWithCallKey(key, { ciphertext: msg.ciphertext, nonce: msg.nonce });
+    if (!answer) { if (DEV) logger.warn('[calls] call:answer:v2 decrypt failed'); return; }
+    await processIncomingAnswer(msg.callId, answer);
+  });
+
+  onCallSignal(socket, 'call:ice:v2', async (raw: unknown, from?: string) => {
+    const msg = raw as SealedKeyWire;
+    if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+    if (from !== undefined && useCall.getState().peer !== from) return;
+    const key = callKeys.get(msg.callId);
+    if (!key) return;
+    const candidate = openWithCallKey(key, { ciphertext: msg.ciphertext, nonce: msg.nonce });
+    if (!candidate) { if (DEV) logger.warn('[calls] call:ice:v2 decrypt failed'); return; }
+    await processIncomingIce(msg.callId, candidate);
+  });
+
+  onCallSignal(socket, 'call:hangup:v2', (raw: unknown, from?: string) => {
+    const msg = raw as { callId: string; reason?: string };
+    if (typeof msg?.callId !== 'string') return;
+    if (from !== undefined && useCall.getState().peer !== from) return;
+    processIncomingHangup(msg.callId);
+  });
+}
+
+/** Wire shape for an incoming v2 call:invite (no `from`). */
+interface SealedInviteWire {
+  callId: string;
+  media: CallMedia;
+  ciphertext: string;
+  nonce: string;
+  epk: string;
+}
+/** Wire shape for an incoming v2 answer / ICE (symmetric, no `from`). */
+interface SealedKeyWire {
+  callId: string;
+  ciphertext: string;
+  nonce: string;
+}
+
+/** Incoming invite handling — caller identity recovered from sealed ciphertext. */
+function processIncomingInvite(
+  socket: NonNullable<ReturnType<typeof getSocket>>,
+  from: string,
+  callId: string,
+  media: CallMedia,
+  offer: string,
+): void {
+  const state = useCall.getState();
+  if (state.status !== 'idle' && state.status !== 'ended') {
+    // Busy — auto-reject via the sealed v2 channel (the only channel).
+    routeCallSignal(socket, 'call:hangup:v2', from, { callId, reason: 'busy' });
+    saveCall({ id: callId, contactId: from, direction: 'in', media, status: 'declined', startedAt: Date.now(), durationS: 0 }).catch(() => {});
+    if (useIdentity.getState().identity) {
+      void useMessages.getState().append({
+        id: crypto.randomUUID(),
+        chatId: from,
+        direction: 'in',
+        body: `[call:declined:${media}:0s]`,
+        createdAt: Date.now(),
+        type: 'text',
+      });
+    }
+    return;
+  }
+  state.startIncoming(from, callId, media, offer);
+}
+
+/** Handle an incoming v2 answer (decrypted upstream via callKey). */
+async function processIncomingAnswer(msgCallId: string, answer: string): Promise<void> {
+  clearRingTimeout();
+  const { activePeer, callId, status } = useCall.getState();
+  if (!activePeer || callId !== msgCallId) return;
+  // Transition to 'connecting' BEFORE the await, and only from
+  // 'outgoing-ringing'. On a fast network the peer connection reaches
+  // 'connected' (status 'in-call', timer running) while the answer is still
+  // being applied — an unconditional setStatus afterwards then DOWNGRADED the
+  // live call back to "Connecting…" and nothing re-fired 'connected' to
+  // repair it until a lucky ICE pair switch (or never).
+  if (status === 'outgoing-ringing') {
+    useCall.getState().setStatus('connecting');
+  }
+  await setRemoteAnswer(activePeer.pc as RTCPeerConnection, answer);
+}
+
+/** Handle an incoming v2 ICE candidate (decrypted upstream via callKey). */
+async function processIncomingIce(msgCallId: string, candidate: string): Promise<void> {
+  const { activePeer, callId } = useCall.getState();
+  if (!activePeer || callId !== msgCallId) return;
+  await addRemoteIce(activePeer.pc as RTCPeerConnection, candidate);
+}
+
+/** Handle an incoming v2 hangup. */
+function processIncomingHangup(msgCallId: string): void {
+  const { callId, activePeer } = useCall.getState();
+  if (callId !== msgCallId) return;
+  if (activePeer?.cleanup) activePeer.cleanup();
+  forgetCallKey(msgCallId);
+  useCall.getState().setStatus('ended');
+  setTimeout(() => useCall.getState().reset(), 800);
+}
+
+/** Start an outgoing call. */
+export async function startCall(toAegisId: string, media: CallMedia): Promise<void> {
+  if (!isConnected()) throw new Error('not_connected');
+  const socket = getSocket();
+  if (!socket) throw new Error('no_socket');
+
+  const callId = crypto.randomUUID();
+  useCall.getState().startOutgoing(toAegisId, callId, media);
+
+  // Sealed-sender v2: resolve the peer's box key + our own signing identity.
+  // Generate the callKey UP FRONT so ICE trickling out during createOffer is
+  // already sealed under it.
+  const canSeal = !!peerBoxKey(toAegisId) && !!ownSealedKeys();
+  if (canSeal) rememberCallKey(callId, nacl.randomBytes(nacl.secretbox.keyLength));
+
+  const ownAegisId = useIdentity.getState().identity?.aegisId ?? 'anon';
+  const turnConfig = await fetchTurnConfig(ownAegisId);
+
+  const peer = await createPeer(
+    media,
+    {
+      onLocalStream: (s) => useCall.getState().setStreams(s, useCall.getState().remoteStream),
+      onRemoteStream: (s) => useCall.getState().setStreams(useCall.getState().localStream, s),
+      onIceCandidate: (candidate) => {
+        if (!emitCallSignal(socket, 'ice', callId, toAegisId, JSON.stringify(candidate.toJSON()))) {
+          if (DEV) console.warn('[calls] cannot seal outgoing ICE — callKey missing');
+        }
+      },
+      onConnectionStateChange: (state) => {
+        if (state === 'connected') useCall.getState().setStatus('in-call');
+        if (state === 'failed' || state === 'closed') endCall('rtc_failure');
+      },
+    },
+    turnConfig,
+  );
+  useCall.getState().setActivePeer({ ...peer, peerId: toAegisId });
+
+  const offer = await createOffer(peer.pc as RTCPeerConnection);
+  if (canSeal) {
+    const me = ownSealedKeys();
+    const recipientPub = peerBoxKey(toAegisId);
+    const callKey = callKeys.get(callId);
+    if (!me || !recipientPub || !callKey) { endCall('encrypt_failure'); return; }
+    const sealed = sealCallInvite(recipientPub, me.aegisId, me.signingSecretKey, offer, Date.now(), callKey);
+    // Federation F4: a callee on another relay is rung through THEIR relay
+    // (sealed call_signal + `wakeHint: 'call'`); a local callee as before.
+    if (!routeCallSignal(socket, 'call:invite:v2', toAegisId, { callId, media, ...sealed.wire })) { endCall('encrypt_failure'); return; }
+  } else {
+    // v2 policy but sealed-sender is impossible — peer box key or our signing
+    // identity is unavailable. Fail CLOSED: never fall back to a `from`-leaking
+    // (and, on desktop, cleartext) v1 invite (golden rules #4 + #6). Parity with
+    // mobile/src/socket/calls.ts.
+    if (DEV) logger.warn('[calls] cannot seal call invite — failing closed (no v1 fallback)');
+    endCall('encrypt_failure');
+    return;
+  }
+
+  _ringTimeout = setTimeout(() => {
+    if (useCall.getState().status === 'outgoing-ringing') {
+      endCall('no_answer');
+    }
+  }, 45_000);
+}
+
+/** Accept an incoming call (we already have the offer in pendingOffer). */
+export async function acceptCall(): Promise<void> {
+  const { peer: peerId, callId, media, pendingOffer } = useCall.getState();
+  if (!peerId || !callId || !pendingOffer) return;
+  const socket = getSocket();
+  if (!socket) throw new Error('no_socket');
+
+  useCall.getState().setStatus('connecting');
+
+  const ownAegisId = useIdentity.getState().identity?.aegisId ?? 'anon';
+  const turnConfig = await fetchTurnConfig(ownAegisId);
+
+  const peer = await createPeer(
+    media,
+    {
+      onLocalStream: (s) => useCall.getState().setStreams(s, useCall.getState().remoteStream),
+      onRemoteStream: (s) => useCall.getState().setStreams(useCall.getState().localStream, s),
+      onIceCandidate: (candidate) => {
+        if (!emitCallSignal(socket, 'ice', callId, peerId, JSON.stringify(candidate.toJSON()))) {
+          if (DEV) console.warn('[calls] cannot seal outgoing ICE — callKey missing');
+        }
+      },
+      onConnectionStateChange: (state) => {
+        if (state === 'connected') useCall.getState().setStatus('in-call');
+        if (state === 'failed' || state === 'closed') endCall('rtc_failure');
+      },
+    },
+    turnConfig,
+  );
+  useCall.getState().setActivePeer({ ...peer, peerId });
+
+  await setRemoteOffer(peer.pc as RTCPeerConnection, pendingOffer);
+  const answer = await createAnswer(peer.pc as RTCPeerConnection);
+  // Seal the answer with the per-call key. Abort on seal failure (never plaintext).
+  if (!emitCallSignal(socket, 'answer', callId, peerId, answer)) {
+    endCall('encrypt_failure');
+    return;
+  }
+  useCall.getState().setPendingOffer(null);
+}
+
+/** Reject an incoming call or end an active one. */
+export function endCall(reason: string = 'hangup'): void {
+  clearRingTimeout();
+  const { peer: peerId, callId, activePeer, status, media, startedAt, pendingOffer } =
+    useCall.getState();
+  const socket = getSocket();
+  if (socket && peerId && callId) {
+    // Always v2 — the relay never sees `from` (sealed-sender).
+    routeCallSignal(socket, 'call:hangup:v2', peerId, { callId, reason });
+  }
+  if (callId) forgetCallKey(callId);
+
+  if (callId && peerId) {
+    const wasIncoming =
+      status === 'incoming-ringing' || (status === 'in-call' && pendingOffer !== null);
+    const wasAnswered = status === 'in-call';
+    const callStatus: 'missed' | 'answered' | 'declined' =
+      reason === 'declined' ? 'declined' : wasAnswered ? 'answered' : 'missed';
+    const durationS =
+      wasAnswered && startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0;
+
+    saveCall({
+      id: callId,
+      contactId: peerId,
+      direction: wasIncoming ? 'in' : 'out',
+      media: media ?? 'audio',
+      status: callStatus,
+      startedAt: startedAt ?? Date.now(),
+      durationS,
+    }).catch(() => {});
+
+    if (useIdentity.getState().identity) {
+      void useMessages.getState().append({
+        id: crypto.randomUUID(),
+        chatId: peerId,
+        direction: wasIncoming ? 'in' : 'out',
+        body: `[call:${callStatus}:${media ?? 'audio'}:${durationS}s]`,
+        createdAt: Date.now(),
+        type: 'text',
+      });
+    }
+  }
+
+  if (activePeer?.cleanup) activePeer.cleanup();
+  useCall.getState().setStatus('ended');
+  setTimeout(() => useCall.getState().reset(), 600);
+}
+
+export function toggleMute(): void {
+  const { activePeer, muted } = useCall.getState();
+  if (!activePeer?.localStream) return;
+  const newMuted = !muted;
+  for (const track of (activePeer.localStream as MediaStream).getAudioTracks())
+    track.enabled = !newMuted;
+  useCall.getState().setMuted(newMuted);
+}
+
+export function toggleCamera(): void {
+  const { activePeer, cameraOff } = useCall.getState();
+  if (!activePeer?.localStream) return;
+  const newOff = !cameraOff;
+  for (const track of (activePeer.localStream as MediaStream).getVideoTracks())
+    track.enabled = !newOff;
+  useCall.getState().setCameraOff(newOff);
+}

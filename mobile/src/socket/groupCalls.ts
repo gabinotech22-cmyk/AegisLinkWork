@@ -1,0 +1,1136 @@
+/**
+ * Group call signaling for AegisLink.
+ *
+ * Topology: full-mesh peer-to-peer. For N participants: N*(N-1)/2 peer
+ * connections. Limit: 8 participants max. Audio-only for MVP.
+ *
+ * All SDP offers, answers, and ICE candidates are sealed with NaCl box to
+ * the recipient's static X25519 public key before reaching the relay — the
+ * same sealed-signaling pattern as 1:1 calls in calls.ts.
+ *
+ * Wire events (routed by relay using `to` / `from`):
+ *   group_call:invite  — initiator → all members
+ *   group_call:accept  — member → initiator (triggers offer creation)
+ *   group_call:decline — member → initiator
+ *   group_call:offer   — sealed SDP offer A→B
+ *   group_call:answer  — sealed SDP answer B→A
+ *   group_call:ice     — sealed ICE candidate
+ *   group_call:hangup  — leaving the call
+ */
+
+import * as Crypto from 'expo-crypto';
+import { logger } from '../utils/logger';
+import nacl from 'tweetnacl';
+import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
+import type { MediaStream } from 'react-native-webrtc';
+import { getSocket, isConnected } from './client';
+import { useGroupCall } from '../store/groupCall';
+import { useActiveCalls } from '../store/activeCalls';
+import { fetchTurnConfig } from '../webrtc/ice';
+import {
+  createPeer,
+  createOffer,
+  setRemoteOffer,
+  createAnswer,
+  setRemoteAnswer,
+  addRemoteIce,
+  type ActivePeer,
+} from '../webrtc/peer';
+import type { Identity } from '../crypto/identity';
+import { themedAlert } from '../components/AlertHost';
+import i18n from '../i18n';
+import { startInCallAudio, stopInCallAudio } from '../webrtc/inCall';
+import { startCallService, stopCallService } from '../webrtc/callForegroundService';
+import { onCallSignal, routeCallSignal, routeCallSignalItems } from './callSignalRouter';
+
+// ---------------------------------------------------------------------------
+// Shared local audio stream — acquired once per call, reused across all peers.
+// This is critical for correct mute behaviour: a single track.enabled=false
+// silences all peer connections simultaneously.
+// ---------------------------------------------------------------------------
+
+let _groupLocalStream: MediaStream | null = null;
+
+async function acquireGroupStream(): Promise<MediaStream> {
+  if (_groupLocalStream) return _groupLocalStream;
+  const { mediaDevices } = require('react-native-webrtc') as typeof import('react-native-webrtc');
+  const stream = (await (mediaDevices as any).getUserMedia({ audio: true, video: false })) as unknown as MediaStream;
+  _groupLocalStream = stream;
+  useGroupCall.getState().setLocalStream(stream);
+  return stream;
+}
+
+function releaseGroupStream(): void {
+  if (!_groupLocalStream) return;
+  try { for (const t of _groupLocalStream.getTracks()) t.stop(); } catch { /* ignore */ }
+  _groupLocalStream = null;
+}
+
+// ---------------------------------------------------------------------------
+// NaCl sealed-signaling helpers (mirrors calls.ts)
+// ---------------------------------------------------------------------------
+
+const SIGNAL_VERSION = 1;
+
+interface SealedSignalWire {
+  ciphertext: string;
+  nonce: string;
+}
+
+interface SignalInner {
+  v: number;
+  from: string;
+  payload: string;
+}
+
+function peerPublicKey(aegisId: string): Uint8Array | null {
+  try {
+    const { useContacts } = require('../store/contacts') as {
+      useContacts: {
+        getState: () => { get: (id: string) => { publicKeyB64: string } | undefined };
+      };
+    };
+    const b64 = useContacts.getState().get(aegisId)?.publicKeyB64;
+    if (!b64) return null;
+    const key = decodeBase64(b64);
+    return key.length === nacl.box.publicKeyLength ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+function ownKeys(): { secretKey: Uint8Array; aegisId: string } | null {
+  try {
+    const { useIdentity } = require('../store/identity') as {
+      useIdentity: {
+        getState: () => { identity: { secretKey: Uint8Array; aegisId: string } | null };
+      };
+    };
+    const id = useIdentity.getState().identity;
+    if (!id) return null;
+    return { secretKey: id.secretKey, aegisId: id.aegisId };
+  } catch {
+    return null;
+  }
+}
+
+function sealSignal(recipientAegisId: string, payload: string): SealedSignalWire | null {
+  const recipientPub = peerPublicKey(recipientAegisId);
+  const me = ownKeys();
+  if (!recipientPub || !me) return null;
+
+  const inner: SignalInner = { v: SIGNAL_VERSION, from: me.aegisId, payload };
+  const innerBytes = new TextEncoder().encode(JSON.stringify(inner));
+  const nonce = nacl.randomBytes(nacl.box.nonceLength);
+  const ciphertext = nacl.box(innerBytes, nonce, recipientPub, me.secretKey);
+  return { ciphertext: encodeBase64(ciphertext), nonce: encodeBase64(nonce) };
+}
+
+function openSignalFrom(senderAegisId: string, wire: SealedSignalWire): string | null {
+  const senderPub = peerPublicKey(senderAegisId);
+  const me = ownKeys();
+  if (!senderPub || !me) return null;
+
+  let ciphertext: Uint8Array;
+  let nonce: Uint8Array;
+  try {
+    ciphertext = decodeBase64(wire.ciphertext);
+    nonce = decodeBase64(wire.nonce);
+  } catch {
+    return null;
+  }
+  if (nonce.length !== nacl.box.nonceLength) return null;
+
+  // The static box is authenticated: a successful open against `senderPub`
+  // proves the body was sealed by the holder of that peer's X25519 secret. The
+  // inner `from` is then bound to that key — a contact cannot claim another's id.
+  const opened = nacl.box.open(ciphertext, nonce, senderPub, me.secretKey);
+  if (!opened) return null;
+
+  let inner: SignalInner;
+  try {
+    inner = JSON.parse(new TextDecoder().decode(opened)) as SignalInner;
+  } catch {
+    return null;
+  }
+  if (inner.v !== SIGNAL_VERSION) return null;
+  if (inner.from !== senderAegisId) return null;
+  if (typeof inner.payload !== 'string') return null;
+  return inner.payload;
+}
+
+/**
+ * Sealed-sender recovery (Fase B): the relay no longer stamps `from`, so we learn
+ * the sender by trial-decrypting against each candidate in the call/group roster
+ * — exactly the envelope pattern the messaging layer uses. The first candidate
+ * whose key opens the box (and whose id the inner `from` confirms) IS the
+ * authenticated sender. Returns null (fail-closed) if none opens — we never act
+ * on an unauthenticated signal.
+ */
+function openSignalTrial(
+  wire: SealedSignalWire,
+  candidateAegisIds: string[],
+): { from: string; payload: string } | null {
+  for (const candidate of candidateAegisIds) {
+    const payload = openSignalFrom(candidate, wire);
+    if (payload !== null) return { from: candidate, payload };
+  }
+  return null;
+}
+
+/**
+ * Federation F4: a signal that arrived as a sealed `call_signal` from a contact
+ * on another relay carries an authenticated `from`. Then the box is opened
+ * against THAT identity only — and only if it is among the legitimate
+ * candidates (roster / group members): a foreign contact can speak for itself,
+ * never for a member it is not.
+ */
+function pinCandidates(candidates: string[], from: string | undefined): string[] {
+  if (from === undefined) return candidates;
+  return candidates.includes(from) ? [from] : [];
+}
+
+/**
+ * Candidate senders for a signal received while we are IN `callId`: the current
+ * mesh participants, the channel host, and the wider group roster (covers a fresh
+ * offerer not yet in our participant list). Self excluded.
+ */
+function callRosterCandidates(callId: string): string[] {
+  const st = useGroupCall.getState();
+  const set = new Set<string>();
+  if (st.callId === callId) {
+    for (const p of st.participants) set.add(p.aegisId);
+    if (st.initiator) set.add(st.initiator);
+    if (st.groupId) for (const m of localGroupInfo(st.groupId)?.members ?? []) set.add(m);
+  }
+  const me = ownKeys()?.aegisId;
+  if (me) set.delete(me);
+  return [...set];
+}
+
+/** Candidate senders for a channel heartbeat: the members of `groupId` (cleartext on the wire), self excluded. */
+function groupMemberCandidates(groupId: string): string[] {
+  const me = ownKeys()?.aegisId;
+  return (localGroupInfo(groupId)?.members ?? []).filter((m) => m !== me);
+}
+
+/** A per-recipient sealed item on the wire (the relay fans these out by `to`). */
+interface SealedItem {
+  to: string;
+  ciphertext: string;
+  nonce: string;
+}
+
+/**
+ * Seal `payload` once PER recipient (each against that recipient's key) for a
+ * fan-out signal (hangup, channel heartbeat). Recipients we cannot seal for
+ * (no known public key) are dropped — fail-closed: we never emit an unsealed
+ * fallback that would leak `from` to the relay.
+ */
+function sealItems(recipients: string[], payload: string): SealedItem[] {
+  const items: SealedItem[] = [];
+  for (const to of recipients) {
+    const sealed = sealSignal(to, payload);
+    if (sealed) items.push({ to, ...sealed });
+  }
+  return items;
+}
+
+/** Sealed inner body of a channel heartbeat — roster + group name travel encrypted. */
+interface ChannelInner {
+  groupName: string;
+  participants: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Per-participant peer connections
+// ---------------------------------------------------------------------------
+
+interface GroupActivePeer extends ActivePeer {
+  remoteDescSet: boolean;
+  pendingIce: string[];
+}
+
+/** callId → (remoteAegisId → GroupActivePeer) */
+const groupPeerMap = new Map<string, Map<string, GroupActivePeer>>();
+
+// ICE candidates that arrive for a remote BEFORE its GroupActivePeer exists.
+// Peer creation is async (getUserMedia + TURN fetch), so a remote's early
+// trickled candidates used to hit `if (!groupPeer) return` and be dropped —
+// leaving that mesh leg without a route and never connecting. Buffer them here
+// keyed by `${callId}|${fromAegisId}` and drain into the peer the moment it is
+// created. Mirrors the 1:1 ring-window fix in calls.ts.
+const _groupPrePeerIce = new Map<string, string[]>();
+const prePeerKey = (callId: string, from: string): string => `${callId}|${from}`;
+
+function getPeersForCall(callId: string): Map<string, GroupActivePeer> {
+  if (!groupPeerMap.has(callId)) {
+    groupPeerMap.set(callId, new Map());
+  }
+  return groupPeerMap.get(callId)!;
+}
+
+/** Drain any pre-peer-buffered ICE for (callId, from) into a freshly created peer. */
+function drainPrePeerIce(callId: string, from: string, groupPeer: GroupActivePeer): void {
+  const key = prePeerKey(callId, from);
+  const queued = _groupPrePeerIce.get(key);
+  if (!queued) return;
+  _groupPrePeerIce.delete(key);
+  for (const c of queued) void bufferOrApplyIce(groupPeer, c);
+}
+
+function cleanupPeer(peer: GroupActivePeer): void {
+  try { peer.cleanup(); } catch { /* ignore */ }
+}
+
+function cleanupAllPeers(callId: string): void {
+  const peers = groupPeerMap.get(callId);
+  if (peers) {
+    for (const peer of peers.values()) cleanupPeer(peer);
+    peers.clear();
+  }
+  groupPeerMap.delete(callId);
+  // Drop any pre-peer ICE buffered for this call so a later call can't inherit
+  // stale candidates.
+  for (const k of _groupPrePeerIce.keys()) {
+    if (k.startsWith(`${callId}|`)) _groupPrePeerIce.delete(k);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ICE buffering helpers
+// ---------------------------------------------------------------------------
+
+async function bufferOrApplyIce(groupPeer: GroupActivePeer, candidate: string): Promise<void> {
+  if (groupPeer.remoteDescSet) {
+    await addRemoteIce(groupPeer.pc, candidate);
+  } else {
+    groupPeer.pendingIce.push(candidate);
+  }
+}
+
+async function markRemoteDescSet(groupPeer: GroupActivePeer): Promise<void> {
+  groupPeer.remoteDescSet = true;
+  while (groupPeer.pendingIce.length > 0) {
+    const c = groupPeer.pendingIce.shift()!;
+    await addRemoteIce(groupPeer.pc, c);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orphan-guard: if all peers for a call failed and the call never reached
+// 'in-call', transition to 'ended' and release mic/audio resources.
+// ---------------------------------------------------------------------------
+
+function maybeFinalizeFailedCall(callId: string): void {
+  const peers = groupPeerMap.get(callId);
+  const remainingPeers = peers?.size ?? 0;
+  if (remainingPeers > 0) return;
+
+  const state = useGroupCall.getState();
+  if (state.callId !== callId) return;
+  if (state.status === 'in-call' || state.status === 'ended' || state.status === 'idle') return;
+
+  if (__DEV__) logger.warn('[groupCalls] all peers failed for', callId, '— finalizing call');
+
+  try {
+    const { Audio } = require('expo-av') as typeof import('expo-av');
+    void Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: false,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+    });
+  } catch { /* no-op */ }
+
+  // Release proximity sensor, wake-lock and audio focus, and tear down the
+  // Android foreground service / its persistent notification.
+  stopInCallAudio();
+  stopCallService();
+
+  cleanupAllPeers(callId);
+  releaseGroupStream();
+  stopHeartbeat();
+  useGroupCall.getState().setStatus('ended');
+  setTimeout(() => {
+    if (useGroupCall.getState().callId === callId) {
+      useGroupCall.getState().reset();
+    }
+  }, 800);
+}
+
+// ---------------------------------------------------------------------------
+// Build a single RTCPeerConnection to a remote participant (offerer side)
+// ---------------------------------------------------------------------------
+
+async function createGroupPeerAsOfferer(
+  callId: string,
+  remoteAegisId: string,
+): Promise<void> {
+  const socket = getSocket();
+  const me = ownKeys();
+  if (!socket || !me) return;
+
+  let turnConfig: import('../webrtc/ice').RTCConfigShape | undefined;
+  // M4 (audit 2026-07): honor hideCallIp (default ON) → relay-only hides our IP.
+  // The one-way-audio note was a coturn empty-external-ip bug, fixed at the relay;
+  // relay-only now connects both ways.
+  try {
+    const hideCallIp = (require('../store/preferences') as typeof import('../store/preferences')).usePreferences.getState().hideCallIp;
+    turnConfig = await fetchTurnConfig(me.aegisId, hideCallIp);
+  } catch { /* default */ }
+
+  const peer = await createPeer(
+    'audio',
+    {
+      onLocalStream: () => { /* managed by acquireGroupStream */ },
+      onRemoteStream: (stream) => useGroupCall.getState().setParticipantStream(remoteAegisId, stream),
+      onIceCandidate: (candidate) => {
+        const payload = JSON.stringify(candidate.toJSON?.() ?? candidate);
+        const sealed = sealSignal(remoteAegisId, payload);
+        if (!sealed) {
+          if (__DEV__) logger.warn('[groupCalls] cannot seal ICE for', remoteAegisId);
+          return;
+        }
+        routeCallSignal(socket, 'group_call:ice', remoteAegisId, { callId, ...sealed });
+      },
+      onConnectionStateChange: (state) => {
+        if (__DEV__) logger.debug('[groupCalls] peer', remoteAegisId, 'state:', state);
+        if (state === 'connected') {
+          useGroupCall.getState().setParticipantConnected(remoteAegisId, true);
+          useGroupCall.getState().setStatus('in-call');
+        }
+        if (state === 'failed' || state === 'closed') {
+          useGroupCall.getState().setParticipantConnected(remoteAegisId, false);
+        }
+      },
+    },
+    turnConfig,
+    _groupLocalStream ?? undefined,
+  );
+
+  const groupPeer: GroupActivePeer = { ...peer, remoteDescSet: false, pendingIce: [] };
+  getPeersForCall(callId).set(remoteAegisId, groupPeer);
+  drainPrePeerIce(callId, remoteAegisId, groupPeer);
+
+  // Create and send sealed offer
+  try {
+    const offer = await createOffer(peer.pc);
+    const sealed = sealSignal(remoteAegisId, offer);
+    if (!sealed) {
+      if (__DEV__) logger.warn('[groupCalls] cannot seal offer for', remoteAegisId);
+      cleanupPeer(groupPeer);
+      getPeersForCall(callId).delete(remoteAegisId);
+      maybeFinalizeFailedCall(callId);
+      return;
+    }
+    routeCallSignal(socket, 'group_call:offer', remoteAegisId, { callId, ...sealed });
+  } catch (e) {
+    if (__DEV__) logger.warn('[groupCalls] createOffer failed for', remoteAegisId, e);
+    cleanupPeer(groupPeer);
+    getPeersForCall(callId).delete(remoteAegisId);
+    maybeFinalizeFailedCall(callId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Voice-channel heartbeat (Discord-style awareness, no server state)
+//
+// While we are in a group call we periodically re-broadcast a `group_call:channel`
+// event to the rest of the group carrying the current participant roster. Online
+// members render a "join" banner from it (useActiveCalls); offline members get a
+// relay push wake-up. Awareness self-heals: if we stop (hangup/crash) the
+// heartbeat stops and every receiver's banner goes stale after STALE_MS.
+// ---------------------------------------------------------------------------
+
+const HEARTBEAT_MS = 20_000;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let channelMeta: { callId: string; groupId: string; groupName: string; members: string[] } | null = null;
+let _pruneTimer: ReturnType<typeof setInterval> | null = null;
+// callIds we've already raised a local "Unirse" notification for — so the 20s
+// heartbeats don't re-notify. Bounded; oldest evicted past 256 entries.
+const _notifiedChannelCallIds = new Set<string>();
+
+/** Participants we currently believe are in the call (us + known peers). */
+function currentParticipants(): string[] {
+  const me = ownKeys()?.aegisId;
+  const others = useGroupCall.getState().participants.map((p) => p.aegisId);
+  const all = me ? [me, ...others] : others;
+  return Array.from(new Set(all));
+}
+
+function emitChannelHeartbeat(): void {
+  const socket = getSocket();
+  const me = ownKeys()?.aegisId;
+  if (!socket || !channelMeta || !me) return;
+  const recipients = channelMeta.members.filter((m) => m !== me);
+  if (recipients.length === 0) return;
+  // Seal the roster + group name PER recipient — the relay sees neither who is in
+  // the call nor who is heartbeating. groupId/media stay cleartext (routing only).
+  const inner = JSON.stringify({ groupName: channelMeta.groupName, participants: currentParticipants() } satisfies ChannelInner);
+  const items = sealItems(recipients, inner);
+  if (items.length === 0) return;
+  // Federation F4: members on another relay get their sealed item through
+  // their relay; relay-local members stay in the one fan-out emit.
+  routeCallSignalItems(socket, 'group_call:channel', {
+    callId: channelMeta.callId,
+    groupId: channelMeta.groupId,
+    media: 'audio',
+  }, items);
+}
+
+function startHeartbeat(meta: { callId: string; groupId: string; groupName: string; members: string[] }): void {
+  channelMeta = meta;
+  emitChannelHeartbeat(); // announce immediately, then on an interval
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(emitChannelHeartbeat, HEARTBEAT_MS);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  channelMeta = null;
+}
+
+/** Resolve a group's trusted name + member list from the local store. */
+function localGroupInfo(groupId: string): { name: string; members: string[] } | null {
+  try {
+    const { useGroups } = require('../store/groups') as typeof import('../store/groups');
+    const g = useGroups.getState().groups.find((x) => x.id === groupId);
+    return g ? { name: g.name, members: g.members } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Broadcast our departure to the WHOLE group so the "Canal de voz activo" banner
+ * updates (or clears) immediately, instead of lingering until the 45s
+ * heartbeat-stale timeout with a wrong participant count. We send the REMAINING
+ * roster (ourselves already excluded); an explicitly-empty array tells receivers
+ * we were the LAST to leave → drop the banner now. Uses the wide-recipient
+ * `group_call:channel` (≤512 members), unlike `group_call:hangup` (≤7 mesh peers).
+ * No new wire field — an empty `participants` is already valid on the relay.
+ */
+function broadcastChannelLeave(
+  callId: string,
+  groupId: string,
+  groupName: string,
+  remaining: string[],
+  members: string[],
+): void {
+  const socket = getSocket();
+  const me = ownKeys()?.aegisId;
+  if (!socket || !me) return;
+  const recipients = members.filter((m) => m !== me);
+  if (recipients.length === 0) return;
+  // [] participants ⇒ channel now empty (closed). Roster + name sealed per recipient.
+  const inner = JSON.stringify({ groupName, participants: remaining } satisfies ChannelInner);
+  const items = sealItems(recipients, inner);
+  if (items.length === 0) return;
+  routeCallSignalItems(socket, 'group_call:channel', { callId, groupId, media: 'audio' }, items);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a group voice channel. Instead of ringing everyone, we announce the
+ * channel (group_call:channel) and start heartbeating; members see a banner and
+ * join when they want. We enter the call immediately (alone) and mesh with each
+ * member as they join.
+ */
+export async function startGroupCall(
+  identity: Identity,
+  group: { id: string; name: string; members: string[] },
+  otherMembers: string[],
+): Promise<void> {
+  const socket = getSocket();
+  if (!socket || !isConnected()) {
+    themedAlert(i18n.t('groupCall.noConnTitle'), i18n.t('groupCall.noConnStart'));
+    return;
+  }
+
+  void otherMembers; // recipients are derived from group.members in the heartbeat
+  const callId = Crypto.randomUUID();
+  // Enter the channel immediately (alone). startOutgoing with an empty roster,
+  // then mark in-call — we are "in the channel" and waiting for joiners. We are
+  // the host: record our own aegisId as the initiator so hangupGroupCall knows to
+  // end the channel for everyone when we leave (host-ends-for-all).
+  useGroupCall.getState().startOutgoing(callId, group.id, group.name, [], identity.aegisId);
+  useGroupCall.getState().setStatus('in-call');
+
+  try {
+    const { Audio } = require('expo-av') as typeof import('expo-av');
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: false,
+      playThroughEarpieceAndroid: true,
+    });
+  } catch { /* expo-av unavailable */ }
+
+  // Acquire the shared mic stream once for this call.
+  try {
+    await acquireGroupStream();
+  } catch {
+    themedAlert(i18n.t('groupCall.noMicTitle'), i18n.t('groupCall.noMicDesc'));
+    useGroupCall.getState().reset();
+    return;
+  }
+
+  // Earpiece route + proximity sensor (real screen-off near the ear), plus an
+  // Android foreground service so the call survives the app being backgrounded.
+  startInCallAudio();
+  startCallService(useGroupCall.getState().groupName || 'AegisLink', 'Llamada de voz en curso');
+
+  // Announce the channel + start heartbeating. No ring — members get a banner.
+  startHeartbeat({ callId, groupId: group.id, groupName: group.name, members: group.members });
+}
+
+/**
+ * Join an already-open voice channel for `groupId`. Reads the current roster
+ * from the banner state and announces our join (`group_call:accept`) to every
+ * current participant, each of whom offers us a peer connection — reusing the
+ * exact mesh path that the initiator/accept flow already uses.
+ */
+export async function joinGroupCall(groupId: string): Promise<void> {
+  const active = useActiveCalls.getState().getFresh(groupId, Date.now());
+  if (!active) {
+    themedAlert(i18n.t('groupCall.endedTitle'), i18n.t('groupCall.endedDesc'));
+    return;
+  }
+  const socket = getSocket();
+  const me = ownKeys();
+  if (!socket || !isConnected() || !me) {
+    themedAlert(i18n.t('groupCall.noConnTitle'), i18n.t('groupCall.noConnJoin'));
+    return;
+  }
+
+  const info = localGroupInfo(groupId);
+  const groupName = info?.name ?? groupId;
+  const others = active.participants.filter((p) => p !== me.aegisId);
+
+  // Enforce the mesh cap on the resulting size (existing peers + us).
+  if (others.length >= 8) {
+    themedAlert(i18n.t('groupCall.fullTitle'), i18n.t('groupCall.fullDesc'));
+    return;
+  }
+
+  // Record the channel's host (banner initiator) so that when the host hangs up,
+  // our group_call:hangup handler ends the call for us too (host-ends-for-all).
+  useGroupCall.getState().startOutgoing(active.callId, groupId, groupName, [], active.initiator);
+  useGroupCall.getState().setStatus('connecting');
+  for (const p of others) useGroupCall.getState().addParticipant(p);
+
+  try {
+    const { Audio } = require('expo-av') as typeof import('expo-av');
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: false,
+      playThroughEarpieceAndroid: true,
+    });
+  } catch { /* expo-av unavailable */ }
+
+  // Acquire the shared mic stream once for this call.
+  try {
+    await acquireGroupStream();
+  } catch {
+    themedAlert(i18n.t('groupCall.noMicTitle'), i18n.t('groupCall.noMicDesc'));
+    useGroupCall.getState().reset();
+    return;
+  }
+
+  // Earpiece route + proximity sensor (real screen-off near the ear), plus an
+  // Android foreground service so the call survives the app being backgrounded.
+  startInCallAudio();
+  startCallService(useGroupCall.getState().groupName || 'AegisLink', 'Llamada de voz en curso');
+
+  // Tell each current participant we joined — their accept handler offers to us.
+  // Sealed-sender: our identity rides inside the box; the relay never sees `from`.
+  for (const p of others) {
+    const sealed = sealSignal(p, '');
+    if (!sealed) { if (__DEV__) logger.warn('[groupCalls] cannot seal accept for', p); continue; }
+    routeCallSignal(socket, 'group_call:accept', p, { callId: active.callId, ...sealed });
+  }
+
+  // Start our own heartbeat so the rest of the group sees us in the roster, and
+  // drop our local banner for this group (we're in the call now).
+  const members = info?.members ?? [...active.participants, me.aegisId];
+  startHeartbeat({ callId: active.callId, groupId, groupName, members });
+  useActiveCalls.getState().remove(groupId);
+}
+
+/**
+ * Accept an incoming group call. Emits `group_call:accept` to the initiator.
+ * The initiator will then send SDP offers to us.
+ */
+export async function acceptGroupCall(
+  callId: string,
+  initiatorAegisId: string,
+): Promise<void> {
+  const socket = getSocket();
+  if (!socket) return;
+
+  useGroupCall.getState().setStatus('connecting');
+
+  try {
+    const { Audio } = require('expo-av') as typeof import('expo-av');
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: false,
+      playThroughEarpieceAndroid: true,
+    });
+  } catch { /* expo-av unavailable */ }
+
+  // Earpiece route + proximity sensor (real screen-off near the ear), plus an
+  // Android foreground service so the call survives the app being backgrounded.
+  startInCallAudio();
+  startCallService(useGroupCall.getState().groupName || 'AegisLink', 'Llamada de voz en curso');
+
+  const sealed = sealSignal(initiatorAegisId, '');
+  if (!sealed) {
+    if (__DEV__) logger.warn('[groupCalls] cannot seal accept for', initiatorAegisId);
+    return;
+  }
+  routeCallSignal(socket, 'group_call:accept', initiatorAegisId, { callId, ...sealed });
+}
+
+/**
+ * Decline an incoming group call.
+ */
+export function declineGroupCall(callId: string, initiatorAegisId: string): void {
+  const socket = getSocket();
+  if (socket) {
+    const sealed = sealSignal(initiatorAegisId, '');
+    if (sealed) routeCallSignal(socket, 'group_call:decline', initiatorAegisId, { callId, ...sealed });
+    else if (__DEV__) logger.warn('[groupCalls] cannot seal decline for', initiatorAegisId);
+  }
+  useGroupCall.getState().reset();
+}
+
+/**
+ * Local-only group-call teardown: stop heartbeating, tear down every peer,
+ * release the mic, drop audio routing + the foreground service, and end the
+ * store. Emits NO wire signal — used by hangupGroupCall after it has already
+ * announced our departure, and by the host-terminate path on the receiving side
+ * (where re-broadcasting a roster would resurrect the banner on other clients).
+ */
+function endGroupCallLocally(): void {
+  stopHeartbeat();
+  const { callId } = useGroupCall.getState();
+  if (callId) cleanupAllPeers(callId);
+  releaseGroupStream();
+
+  try {
+    const { Audio } = require('expo-av') as typeof import('expo-av');
+    void Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: false,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+    });
+  } catch { /* no-op */ }
+
+  // Release proximity sensor, wake-lock and audio focus, and tear down the
+  // Android foreground service / its persistent notification.
+  stopInCallAudio();
+  stopCallService();
+
+  useGroupCall.getState().setStatus('ended');
+  setTimeout(() => useGroupCall.getState().reset(), 800);
+}
+
+/**
+ * Leave/end the group call. Sends hangup to all mesh participants, announces our
+ * departure to the whole group, then tears down locally.
+ *
+ * Host-ends-for-all: the member who opened the voice channel owns its lifecycle.
+ * When the HOST hangs up we broadcast an EMPTY roster (the "channel closed"
+ * signal) so banner-watchers clear instantly, and every active participant ends
+ * too via the group_call:hangup handler (which recognises the initiator). A
+ * non-host leaving instead broadcasts the REMAINING roster and the call lives on.
+ */
+export function hangupGroupCall(): void {
+  const { callId, groupId, groupName, participants, initiator } = useGroupCall.getState();
+  if (!callId) return;
+
+  const socket = getSocket();
+  const others = participants.map((p) => p.aegisId);
+  if (socket && others.length > 0) {
+    // Per-recipient sealed fan-out — our identity rides inside each box, no `from`.
+    const items = sealItems(others, '');
+    if (items.length > 0) routeCallSignalItems(socket, 'group_call:hangup', { callId }, items);
+  }
+  // Announce our departure so banner-watchers update/clear instead of waiting out
+  // the 45s stale timeout. Host → empty roster ends the channel for everyone;
+  // non-host → remaining roster (self removed), and an empty `others` already
+  // means we were simply the last one out.
+  if (groupId) {
+    const me = ownKeys()?.aegisId;
+    const isHost = !!me && initiator === me;
+    const info = localGroupInfo(groupId);
+    const leaveRoster = isHost ? [] : others;
+    broadcastChannelLeave(callId, groupId, info?.name ?? groupName ?? groupId, leaveRoster, info?.members ?? others);
+  }
+
+  endGroupCallLocally();
+}
+
+/**
+ * Toggle local microphone mute.
+ */
+export function toggleGroupCallMute(): void {
+  const { localStream, muted } = useGroupCall.getState();
+  if (!localStream) return;
+  const newMuted = !muted;
+  for (const track of localStream.getAudioTracks()) {
+    track.enabled = !newMuted;
+  }
+  useGroupCall.getState().setMuted(newMuted);
+}
+
+// ---------------------------------------------------------------------------
+// Socket event listeners — mirrors attachCallHandlers() in calls.ts
+// ---------------------------------------------------------------------------
+
+/**
+ * Register all `group_call:*` socket event listeners. Call this once after
+ * the socket connects and authenticates (from App.tsx alongside attachCallHandlers).
+ */
+export function attachGroupCallHandlers(): void {
+  const socket = getSocket();
+  if (!socket) return;
+
+  // Idempotent (see attachCallHandlers): a reconnect builds a new socket.io
+  // instance, so clear our events before (re)registering to avoid both lost
+  // handlers after a socket recreation and stacked duplicates on re-attach.
+  for (const ev of [
+    'group_call:accept',
+    'group_call:decline',
+    'group_call:offer',
+    'group_call:answer',
+    'group_call:ice',
+    'group_call:channel',
+    'group_call:hangup',
+  ]) {
+    socket.off(ev);
+  }
+
+  // Periodic banner pruning so stale channels (everyone left / crashed) drop
+  // their banners after STALE_MS even without an explicit teardown signal.
+  if (_pruneTimer) clearInterval(_pruneTimer);
+  _pruneTimer = setInterval(() => useActiveCalls.getState().prune(Date.now()), 10_000);
+
+  // ── Initiator receives accept from a member ─────────────────────────────
+  onCallSignal(socket, 'group_call:accept', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as { callId: string; ciphertext: string; nonce: string };
+      if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      const state = useGroupCall.getState();
+      if (state.callId !== msg.callId) return;
+      if (state.status !== 'ringing-out' && state.status !== 'in-call' && state.status !== 'connecting') return;
+
+      // Sealed-sender: recover + authenticate the accepter from the box (no relay
+      // `from`). An accepter who is not a known group member can't be opened → drop.
+      const opened = openSignalTrial(msg, pinCandidates(callRosterCandidates(msg.callId), sealedFrom));
+      if (!opened) { if (__DEV__) logger.warn('[groupCalls] could not authenticate accept'); return; }
+      const from = opened.from;
+
+      state.addParticipant(from);
+      if (state.status === 'ringing-out') {
+        useGroupCall.getState().setStatus('connecting');
+      }
+
+      void createGroupPeerAsOfferer(msg.callId, from).catch((e) => {
+        if (__DEV__) logger.warn('[groupCalls] createGroupPeerAsOfferer failed for', from, e);
+      });
+  });
+
+  // ── Member receives decline ─────────────────────────────────────────────
+  onCallSignal(socket, 'group_call:decline', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as { callId: string; ciphertext: string; nonce: string };
+      if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      const state = useGroupCall.getState();
+      if (state.callId !== msg.callId) return;
+      const opened = openSignalTrial(msg, pinCandidates(callRosterCandidates(msg.callId), sealedFrom));
+      if (!opened) return;
+      if (__DEV__) logger.debug('[groupCalls]', opened.from, 'declined');
+      const peers = groupPeerMap.get(msg.callId);
+      if (peers) {
+        const peer = peers.get(opened.from);
+        if (peer) { cleanupPeer(peer); peers.delete(opened.from); }
+      }
+  });
+
+  // ── Receive sealed SDP offer (non-initiator gets this) ────────────────────
+  onCallSignal(socket, 'group_call:offer', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as { callId: string; ciphertext: string; nonce: string };
+      if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      const state = useGroupCall.getState();
+      if (state.callId !== msg.callId) return;
+
+      // Sealed-sender: recover + authenticate the offerer from the box (no relay
+      // `from`); the same trial-decrypt yields the SDP offer payload.
+      const opened = openSignalTrial(msg, pinCandidates(callRosterCandidates(msg.callId), sealedFrom));
+      if (!opened) {
+        if (__DEV__) logger.warn('[groupCalls] failed to open/authenticate offer');
+        return;
+      }
+      const from = opened.from;
+      const offerSdp = opened.payload;
+
+      state.addParticipant(from);
+
+      const socket2 = getSocket();
+      const me = ownKeys();
+      if (!socket2 || !me) return;
+
+      void (async () => {
+        let turnConfig: import('../webrtc/ice').RTCConfigShape | undefined;
+        // M4 (audit 2026-07): honor hideCallIp (default ON) → relay-only hides our IP.
+        // The one-way-audio note was a coturn empty-external-ip bug, fixed at the
+        // relay; relay-only now connects both ways.
+        try {
+          const hideCallIp = (require('../store/preferences') as typeof import('../store/preferences')).usePreferences.getState().hideCallIp;
+          turnConfig = await fetchTurnConfig(me.aegisId, hideCallIp);
+        } catch { /* default */ }
+
+        const peer = await createPeer(
+          'audio',
+          {
+            onLocalStream: () => { /* managed by acquireGroupStream */ },
+            onRemoteStream: (stream) => useGroupCall.getState().setParticipantStream(from, stream),
+            onIceCandidate: (candidate) => {
+              const payload = JSON.stringify(candidate.toJSON?.() ?? candidate);
+              const sealed = sealSignal(from, payload);
+              if (!sealed) return;
+              socket2.emit('group_call:ice', { callId: msg.callId, to: from, ...sealed });
+            },
+            onConnectionStateChange: (connState) => {
+              if (connState === 'connected') {
+                useGroupCall.getState().setParticipantConnected(from, true);
+                useGroupCall.getState().setStatus('in-call');
+              }
+              if (connState === 'failed' || connState === 'closed') {
+                useGroupCall.getState().setParticipantConnected(from, false);
+              }
+            },
+          },
+          turnConfig,
+          _groupLocalStream ?? undefined,
+        );
+
+        const groupPeer: GroupActivePeer = { ...peer, remoteDescSet: false, pendingIce: [] };
+        getPeersForCall(msg.callId).set(from, groupPeer);
+        drainPrePeerIce(msg.callId, from, groupPeer);
+
+        try {
+          await setRemoteOffer(peer.pc, offerSdp);
+          await markRemoteDescSet(groupPeer);
+          const answer = await createAnswer(peer.pc);
+          const sealed = sealSignal(from, answer);
+          if (!sealed) {
+            if (__DEV__) logger.warn('[groupCalls] cannot seal answer for', from);
+            cleanupPeer(groupPeer);
+            getPeersForCall(msg.callId).delete(from);
+            maybeFinalizeFailedCall(msg.callId);
+            return;
+          }
+          routeCallSignal(socket2, 'group_call:answer', from, { callId: msg.callId, ...sealed });
+        } catch (e) {
+          if (__DEV__) logger.warn('[groupCalls] offer handling failed for', from, e);
+          cleanupPeer(groupPeer);
+          getPeersForCall(msg.callId).delete(from);
+          maybeFinalizeFailedCall(msg.callId);
+        }
+      })();
+  });
+
+  // ── Receive sealed SDP answer ─────────────────────────────────────────────
+  onCallSignal(socket, 'group_call:answer', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as { callId: string; ciphertext: string; nonce: string };
+      if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      const state = useGroupCall.getState();
+      if (state.callId !== msg.callId) return;
+
+      const opened = openSignalTrial(msg, pinCandidates(callRosterCandidates(msg.callId), sealedFrom));
+      if (!opened) {
+        if (__DEV__) logger.warn('[groupCalls] failed to open/authenticate answer');
+        return;
+      }
+      const from = opened.from;
+      const answerSdp = opened.payload;
+
+      const groupPeer = getPeersForCall(msg.callId).get(from);
+      if (!groupPeer) return;
+
+      void (async () => {
+        try {
+          await setRemoteAnswer(groupPeer.pc, answerSdp);
+          await markRemoteDescSet(groupPeer);
+        } catch (e) {
+          if (__DEV__) logger.warn('[groupCalls] setRemoteAnswer failed for', from, e);
+        }
+      })();
+  });
+
+  // ── Receive sealed ICE candidate ──────────────────────────────────────────
+  onCallSignal(socket, 'group_call:ice', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as { callId: string; ciphertext: string; nonce: string };
+      if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      const state = useGroupCall.getState();
+      if (state.callId !== msg.callId) return;
+
+      const opened = openSignalTrial(msg, pinCandidates(callRosterCandidates(msg.callId), sealedFrom));
+      if (!opened) {
+        if (__DEV__) logger.warn('[groupCalls] failed to open/authenticate ICE');
+        return;
+      }
+      const from = opened.from;
+      const candidateJson = opened.payload;
+
+      const groupPeer = getPeersForCall(msg.callId).get(from);
+      if (!groupPeer) {
+        // Peer for this remote not created yet (still acquiring mic / TURN).
+        // Buffer the candidate instead of dropping it; drainPrePeerIce flushes
+        // it as soon as the peer is created.
+        const key = prePeerKey(msg.callId, from);
+        const arr = _groupPrePeerIce.get(key) ?? [];
+        arr.push(candidateJson);
+        _groupPrePeerIce.set(key, arr);
+        return;
+      }
+
+      void bufferOrApplyIce(groupPeer, candidateJson);
+  });
+
+  // ── Voice-channel heartbeat → banner awareness (no ring) ───────────────────
+  onCallSignal(socket, 'group_call:channel', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as {
+      callId: string;
+      groupId: string;
+      media: 'audio' | 'video';
+      ciphertext: string;
+      nonce: string;
+    };
+      if (typeof msg?.callId !== 'string' || typeof msg.groupId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      // If this heartbeat is for the call I'm already in, it's not a banner.
+      if (useGroupCall.getState().callId === msg.callId) return;
+
+      // ── Membership gate (receiver-side) ────────────────────────────────────
+      // groupId rides cleartext (routing); the roster + sender identity are
+      // sealed. We resolve the trusted member list from the cleartext groupId and
+      // trial-decrypt against it. A heartbeat we cannot open against any member is
+      // dropped (fail-closed) — an unknown/non-member sender never reaches us. We
+      // intentionally do NOT enforce admin-only: the Discord-style channel model
+      // lets any member open a voice channel (the banner is passive, it does not
+      // ring anyone).
+      let localGroup: import('../db/local').StoredGroup | undefined;
+      try {
+        const { useGroups } = require('../store/groups') as typeof import('../store/groups');
+        localGroup = useGroups.getState().groups.find((g) => g.id === msg.groupId);
+      } catch { return; }
+      if (!localGroup) return; // Unknown group — ignore
+
+      // Sealed-sender: recover + authenticate the heartbeat sender, and the sealed
+      // roster + group name, from the box (no relay `from`).
+      const opened = openSignalTrial(msg, pinCandidates(groupMemberCandidates(msg.groupId), sealedFrom));
+      if (!opened) {
+        if (__DEV__) logger.warn('[groupCalls] channel dropped — could not authenticate sender');
+        return;
+      }
+      const from = opened.from;
+      let inner: ChannelInner;
+      try {
+        inner = JSON.parse(opened.payload) as ChannelInner;
+      } catch { return; }
+      if (typeof inner.groupName !== 'string' || !Array.isArray(inner.participants)) return;
+      const groupName = inner.groupName;
+      const participants = inner.participants;
+
+      // Explicit leave/close: a hanging-up participant broadcasts the REMAINING
+      // roster (themselves removed). An explicitly-empty array means the LAST
+      // participant left → drop the banner now instead of waiting out STALE_MS.
+      // Normal heartbeats always include the sender, so [] is unambiguous.
+      if (participants.length === 0) {
+        const entry = useActiveCalls.getState().calls[msg.groupId];
+        if (entry && entry.callId === msg.callId) useActiveCalls.getState().remove(msg.groupId);
+        return;
+      }
+
+      // A heartbeat can come from any participant; gate on the channel's
+      // initiator. First sighting records the initiator; later heartbeats keep it.
+      const existing = useActiveCalls.getState().calls[msg.groupId];
+      const initiator = existing?.callId === msg.callId ? existing.initiator : from;
+      if (!localGroup.members.includes(initiator)) {
+        if (__DEV__) logger.warn('[groupCalls] channel dropped — initiator not in group', initiator);
+        return;
+      }
+
+      const isNewChannel = existing?.callId !== msg.callId;
+
+      useActiveCalls.getState().upsert({
+        callId: msg.callId,
+        groupId: msg.groupId,
+        initiator,
+        participants: participants.length > 0 ? participants : [from],
+        lastHeartbeat: Date.now(),
+      });
+
+      // First time we see THIS channel (not every 20s heartbeat): surface the
+      // local "Unirse / Descartar" notification. Skipped when this group's chat
+      // is already on screen (the in-chat banner covers that), inside push.ts.
+      if (isNewChannel && !_notifiedChannelCallIds.has(msg.callId)) {
+        _notifiedChannelCallIds.add(msg.callId);
+        if (_notifiedChannelCallIds.size > 256) {
+          _notifiedChannelCallIds.delete(_notifiedChannelCallIds.values().next().value as string);
+        }
+        try {
+          const { showGroupCallChannelNotification } =
+            require('../notifications/push') as typeof import('../notifications/push');
+          void showGroupCallChannelNotification(msg.groupId, groupName, msg.callId);
+        } catch { /* push module not ready — banner still shows in-app */ }
+      }
+  });
+
+  // ── Remote peer hangs up ──────────────────────────────────────────────────
+  onCallSignal(socket, 'group_call:hangup', (raw: unknown, sealedFrom?: string) => {
+      const msg = raw as { callId: string; ciphertext: string; nonce: string };
+      if (typeof msg?.callId !== 'string' || typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return;
+      const state = useGroupCall.getState();
+      if (state.callId !== msg.callId) return;
+
+      // Recover + authenticate the leaver from the sealed body (no relay `from`).
+      const opened = openSignalTrial(msg, pinCandidates(callRosterCandidates(msg.callId), sealedFrom));
+      if (!opened) return;
+      const from = opened.from;
+
+      const peers = groupPeerMap.get(msg.callId);
+      if (peers) {
+        const peer = peers.get(from);
+        if (peer) { cleanupPeer(peer); peers.delete(from); }
+      }
+
+      // Host-ends-for-all: if the channel's initiator hangs up, the whole call
+      // ends for us too — the member who opened the voice channel owns its
+      // lifecycle. state.initiator is the host: our own id when we started it, or
+      // the banner's initiator when we joined. This also covers the initiator
+      // cancelling a still-ringing call.
+      if (state.initiator && state.initiator === from) {
+        endGroupCallLocally();
+        return;
+      }
+
+      // A non-host left: remove (not just mark-disconnected) just them so our
+      // heartbeat and leave-broadcast stop re-listing them — that stale roster was
+      // the cause of the wrong "N en llamada" count after someone left.
+      useGroupCall.getState().removeParticipant(from);
+  });
+}
