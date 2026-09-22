@@ -80,7 +80,7 @@ en emulador y desktop con tema WORK; ningún resto de features del personal que 
 Criterio: `PROTOCOL.md` §3-§9 implementado con un test por endpoint/evento sensible y tests de
 aislamiento entre orgs; `THREAT-MODEL.md` §3 con test enlazado en T1, T2, T3, T6, T9, T10, T12.
 - [x] Canonicalización + firma de acciones (`orgSig`) en los tres paquetes, con vectores dorados
-      compartidos y 56 tests por paquete (PR #16; `PROTOCOL.md` §3 y §12).
+      compartidos y 56 tests por paquete (PR #21; `PROTOCOL.md` §3 y §12).
 - [ ] Cadena de certificados (admin → membresía → aprobación de dispositivo) y `used_nonces`.
 - [ ] Enrolamiento (`/enroll`), aprobación de dispositivo, revocación con rekey.
 - [ ] Orgs, equipos, miembros, salas, `room:key_dist/msg/rekey`, políticas, retención con TTL.

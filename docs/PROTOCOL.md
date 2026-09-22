@@ -1,6 +1,6 @@
 # AegisLink Work — Protocolo
 
-> **Estado:** ✅ Diseño v1 (2026-09-19). §2-§3 implementados (fase 3, PR #16); el resto sigue
+> **Estado:** ✅ Diseño v1 (2026-09-19). §2-§3 implementados (fase 3, PR #21); el resto sigue
 > siendo diseño — el mapa §12 dice qué existe ya en código. **Doc canónico** del wire
 > (`server/src/relay/**`, `relay/schemas.ts`) y de la cripto de clientes (mapa en `CLAUDE.md`).
 > Todo lo que este doc **no** redefine es idéntico al `PROTOCOL.md` del AegisLink personal en el
@@ -49,7 +49,7 @@ sig = Ed25519.sign(msg, actorSigKey)
 - La **misma firma** se persiste como entrada de auditoría: la auditoría no es un log aparte que
   pueda divergir, es la autorización.
 
-**Implementado** (PR #16): `canonicalJson.ts` + `orgSig.ts` en los tres paquetes, con vectores
+**Implementado** (PR #21): `canonicalJson.ts` + `orgSig.ts` en los tres paquetes, con vectores
 dorados compartidos (`orgSig.vectors.ts`) que los tres reproducen byte a byte. Detalles que el
 código fija y este doc no decía:
 
