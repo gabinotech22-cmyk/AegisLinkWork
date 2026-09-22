@@ -27,6 +27,10 @@ Organization 1──* Team 1──* Member 1──* Device
 | `tenancy` | `multi` \| `single` | Solo informativo en `single` |
 | `createdAt` | día (sin hora) | Metadato mínimo |
 
+> Los certificados (membresía, admin, aprobación de dispositivo) están implementados en
+> `crypto/orgCert.ts` de los tres paquetes (PR #23); los campos de las tablas siguientes son los
+> cuerpos que ese módulo firma y verifica.
+
 ### Member (certificado de membresía)
 | Campo | Tipo | Notas |
 |---|---|---|
