@@ -22,6 +22,17 @@ Otros workflows activos desde el día 0:
 - `dependabot.yml` — bumps semanales agrupados por paquete (`github-actions`, `mobile`, `server`,
   `desktop`; `docker` se activa en la fase 6). Los *security updates* (PRs por CVE) van aparte y
   los abre GitHub cuando aparece la alerta.
+
+  **Majors: nunca como bump rutinario.** Cada `ignore` del fichero lleva escrito por qué ese
+  major no puede entrar solo: o está atado a la línea del SDK de Expo / de Electron / de vite,
+  o cambia comportamiento en runtime que el CI no prueba (binding nativo de SQLCipher, ruta Tor,
+  cliente HTTP del relay, cripto). Se mueven en una **pasada deliberada** con su prueba real
+  (build empaquetado, relay en marcha, vectores de `orgSig` re-corridos) y luego se quita la
+  regla. Si Dependabot vuelve a abrir uno de estos, la regla se escribió mal.
+
+  **El lock de `mobile/` se regenera solo con npm 10.** Dependabot usa npm 11, que borra la
+  entrada anidada `@expo/image-utils > typescript` y deja `npm ci` roto en CI; cuando pase,
+  `cd mobile && npx npm@10 install --package-lock-only` y se empuja el lock a la rama de la PR.
 - `semgrep.yml` — packs públicos + `.semgrep/aegislink-rules.yml`, que codifica las **Reglas de Oro de
   seguridad** (fail-closed, sin `plain:`, sin material de clave en logs…). Hereda las reglas del
   AegisLink normal; las reglas específicas Work (firmas admin atadas al payload, sin REST de mensajes)
