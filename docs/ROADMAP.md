@@ -88,7 +88,6 @@ aislamiento entre orgs; `THREAT-MODEL.md` §3 con test enlazado en T1, T2, T3, T
       `ADMIN-CONSOLE.md` §3, compuestas en `org/authorize.ts`: 42 tests (PR #24). Incluye la regla
       Semgrep `aegislink-org-table-needs-org-id` que estaba aparcada desde la fase 2.
 - [ ] Enrolamiento (`/enroll`), aprobación de dispositivo, revocación con rekey.
-- [ ] Enrolamiento (`/enroll`), aprobación de dispositivo, revocación con rekey.
 - [ ] Orgs, equipos, miembros, salas, `room:key_dist/msg/rekey`, políticas, retención con TTL.
 - [ ] Audit log = firmas; exportación JSON/CSV escapada.
 - [ ] `TENANCY=multi|single`, repos con `orgId` obligatorio.

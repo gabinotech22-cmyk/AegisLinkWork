@@ -104,6 +104,28 @@ updates:
       # Bump deliberately together with the toolchain, then drop this rule.
       - dependency-name: typescript
         update-types: [version-update:semver-major]
+      # jest-expo's MAJOR is the Expo SDK line (54.x = SDK 54): jest-expo@57
+      # brings SDK 57's transformer and module mocks and cannot run this SDK's
+      # tests (Work PR #18, closed). Moves in the SDK-upgrade PR.
+      - dependency-name: jest-expo
+        update-types: [version-update:semver-major]
+      # jest itself is pinned by jest-expo's peer range, so a jest major alone
+      # can never install (Work PR #17, closed). Same for its types.
+      - dependency-name: jest
+        update-types: [version-update:semver-major]
+      - dependency-name: "@types/jest"
+        update-types: [version-update:semver-major]
+      # RNTL majors track the React/React Native line, which is frozen on the
+      # SDK above (Work PR #20, closed).
+      - dependency-name: "@testing-library/react-native"
+        update-types: [version-update:semver-major]
+      # @noble/hashes@2 moved its subpath exports (sha256 -> sha2.js): the bump
+      # alone breaks every import and would desync mobile from desktop, which is
+      # already on v2 (see the SHA-256 note in crypto/orgSig.ts). Crypto moves
+      # deliberately, with the orgSig golden vectors re-run on both clients —
+      # never as a routine bump (Work PR #19, closed).
+      - dependency-name: "@noble/hashes"
+        update-types: [version-update:semver-major]
 
   # ── Relay server (Node/Bun, AGPL) ────────────────────────────────────────
   - package-ecosystem: npm
@@ -126,6 +148,16 @@ updates:
       # drop this rule.
       - dependency-name: typescript
         update-types: [version-update:semver-major]
+      # The three below are relay-critical runtime deps whose majors change
+      # behaviour the test suite cannot fully prove (connection handling, push
+      # delivery, cluster semantics). They get a deliberate pass with the relay
+      # running, not a weekly PR (Work PRs #9, #11, #12, closed).
+      - dependency-name: undici
+        update-types: [version-update:semver-major]
+      - dependency-name: ioredis
+        update-types: [version-update:semver-major]
+      - dependency-name: expo-server-sdk
+        update-types: [version-update:semver-major]
 
   # ── Desktop (Electron) ───────────────────────────────────────────────────
   - package-ecosystem: npm
@@ -146,6 +178,22 @@ updates:
     # packaged smoke-test before merge — keep them as separate, visible PRs.
     ignore:
       - dependency-name: electron
+        update-types: [version-update:semver-major]
+      # The native SQLCipher binding: a major rebuilds the prebuilt binary and
+      # touches DB encryption at rest (golden rule #10). It only ships after a
+      # PACKAGED smoke test opens an existing encrypted profile — an npm-ci-green
+      # CI run proves nothing here (Work PR #15, closed).
+      - dependency-name: better-sqlite3-multiple-ciphers
+        update-types: [version-update:semver-major]
+      # Carries the embedded-Tor path (sealed-sender Fase 4). A major changes
+      # the agent API and fails closed at runtime, not at build (Work PR #10).
+      - dependency-name: socks-proxy-agent
+        update-types: [version-update:semver-major]
+      # Test/build toolchain pinned to the vite line above: vitest@5 and
+      # plugin-react@6 want vite 8 (Work PRs #13, #14, closed). Bump with vite.
+      - dependency-name: vitest
+        update-types: [version-update:semver-major]
+      - dependency-name: "@vitejs/plugin-react"
         update-types: [version-update:semver-major]
       # electron-vite@5 pins vite ^4–^7 (PR #320): vite 8 can't install until
       # electron-vite ships support. Bump both together, then drop this rule.
