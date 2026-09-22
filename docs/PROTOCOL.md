@@ -1,6 +1,7 @@
 # AegisLink Work — Protocolo
 
-> **Estado:** ✅ Diseño v1 (2026-09-19); sin código todavía. **Doc canónico** del wire
+> **Estado:** ✅ Diseño v1 (2026-09-19). §2-§3 implementados (fase 3, PR #21); el resto sigue
+> siendo diseño — el mapa §12 dice qué existe ya en código. **Doc canónico** del wire
 > (`server/src/relay/**`, `relay/schemas.ts`) y de la cripto de clientes (mapa en `CLAUDE.md`).
 > Todo lo que este doc **no** redefine es idéntico al `PROTOCOL.md` del AegisLink personal en el
 > commit del que se copia la semilla cripto (ADR-0001): primitivas, X3DH/PQXDH, Double Ratchet,
@@ -47,6 +48,25 @@ sig = Ed25519.sign(msg, actorSigKey)
   `orgId` del certificado == `orgId` del payload (nunca el de la URL/socket) → nonce no usado.
 - La **misma firma** se persiste como entrada de auditoría: la auditoría no es un log aparte que
   pueda divergir, es la autorización.
+
+**Implementado** (PR #21): `canonicalJson.ts` + `orgSig.ts` en los tres paquetes, con vectores
+dorados compartidos (`orgSig.vectors.ts`) que los tres reproducen byte a byte. Detalles que el
+código fija y este doc no decía:
+
+- `canonicalJson` es un **subconjunto** de RFC 8785: solo enteros seguros. JCS delega el formato
+  de los decimales en `Number::toString`, fácil de reimplementar *casi* bien (`1e21`, `-0`,
+  `5e-324`); un formato de firma sutilmente distinto en una plataforma produce firmas que
+  verifican aquí y fallan allá. Ningún campo de una acción es fraccionario, así que se **rechaza**
+  en vez de arriesgar. También se rechazan `undefined`, `NaN`, `±Infinity`, `-0`, `BigInt`,
+  ciclos y objetos no planos (Date, Map, instancias de clase): cada uno carece de una única
+  codificación honesta.
+- `verifyOrgAction` exige el **`action` esperado** como parámetro: un verificador que acepta la
+  acción que diga el payload ha delegado la autorización en el atacante.
+- Una firma no puede reclamar más vida que la política: `exp - now > 5 min + 1 min de desfase` →
+  `ttl_too_long`. Sin esto, un dispositivo de admin podría acuñar una autorización de un año que
+  sobreviviera a su propio certificado.
+- El módulo **no** hace anti-replay (es puro): devuelve el `nonce` para que el relay lo consuma
+  en `used_nonces` hasta `exp`. Entra con el enrolamiento.
 
 ## 4. Enrolamiento
 
@@ -172,7 +192,8 @@ señalización sellada y credenciales TURN de vida limitada.
 
 | Sección | Archivo |
 |---|---|
-| §3 canonicalización/firma | `mobile/src/crypto/orgSig.ts`, `desktop/src/renderer/crypto/orgSig.ts`, `server/src/crypto/orgSig.ts` |
+| §2 `orgId` = base32(sha256(orgPubKey))[0:20] | `deriveOrgId` / `orgIdMatchesKey` en `orgSig.ts` (los 3 paquetes) |
+| §3 canonicalización/firma | `mobile/src/crypto/{canonicalJson,orgSig}.ts`, `desktop/src/renderer/crypto/{canonicalJson,orgSig}.ts`, `server/src/crypto/{canonicalJson,orgSig}.ts`; vectores y tests: `orgSig.test.ts` + `orgSig.vectors.ts` en los 3 |
 | §4 enrolamiento | `server/src/routes/enroll.ts`, `mobile/src/org/enroll.ts` |
 | §6 salas | `mobile/src/crypto/roomKey.ts`, `server/src/relay/handlers/rooms.ts` |
 | §7 retención | `server/src/org/retention.ts` |
