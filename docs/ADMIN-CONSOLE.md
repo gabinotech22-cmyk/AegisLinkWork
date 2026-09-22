@@ -27,6 +27,13 @@ requiere eso, no se construye (ADR-0002).
 
 ## 3. Matriz rol → acción
 
+> **Implementada** en `server/src/org/roles.ts` (PR #24) como tabla cerrada: una acción que no
+> esté en ella se rechaza antes de verificar nada. Dos propiedades que el código hace estructurales:
+> las acciones de sala se deciden por el **rol de sala** y nunca caen de vuelta al rol de org (un
+> owner que no modera esa sala no puede añadir miembros ni forzar rekey), y el rol de org solo se
+> salta con la excepción `self` (revocar **tu** dispositivo, irte de la org), derivada del actor
+> autenticado y nunca de un id que mande el cliente.
+
 | Acción | Owner | Admin | Member | Guest |
 |---|---|---|---|---|
 | Crear org, rotar clave de org, dar de baja org | ✅ | ❌ | ❌ | ❌ |

@@ -87,8 +87,31 @@ código fija y este doc no decía:
 - Una firma no puede reclamar más vida que la política: `exp - now > 5 min + 1 min de desfase` →
   `ttl_too_long`. Sin esto, un dispositivo de admin podría acuñar una autorización de un año que
   sobreviviera a su propio certificado.
-- El módulo **no** hace anti-replay (es puro): devuelve el `nonce` para que el relay lo consuma
-  en `used_nonces` hasta `exp`. Entra con el enrolamiento.
+- El anti-replay lo hace el relay: `server/src/org/{nonceRepo,authorize}.ts` (PR #24).
+
+**La puerta del relay** (`org/authorize.ts`, PR #24) ejecuta la lista de arriba en este orden, y
+el orden es parte del diseño:
+
+1. **acción conocida** — un nombre fuera de la tabla cerrada se rechaza antes de hacer cripto;
+   nunca "se permite por defecto".
+2. **cadena de certificados** — quien no encadena hasta la clave de org pinneada no tiene
+   posición, firme lo que firme.
+3. **firma**, verificada con la clave de identidad que dice **el certificado**, no la que diga el
+   payload.
+4. **`orgId` del certificado == `orgId` del payload** — comparado contra el certificado
+   verificado, jamás contra la URL, el socket ni un campo del cliente (regla de oro #7). Un admin
+   legítimo de la org A no puede actuar dentro de la org B apuntando su acción allí.
+5. **rol suficiente** (`org/roles.ts`, tabla de `ADMIN-CONSOLE.md` §3).
+6. **nonce, el último**. Consumirlo antes dejaría que cualquier payload malformado o no autorizado
+   quemara el nonce que un admin legítimo está a punto de usar: convertiría una defensa
+   anti-replay en una palanca de denegación de servicio. El consumo es **atómico** (la unicidad de
+   la clave primaria decide la carrera, no una lectura previa), así que dos réplicas simultáneas
+   no pueden ejecutarse las dos.
+
+`used_nonces` lleva `org_id` **en la clave primaria**, no como columna por la que filtrar
+después: en `TENANCY=multi` dos organizaciones no pueden quemarse los nonces entre sí, y ese
+aislamiento tiene que ser estructural. La regla Semgrep `aegislink-org-table-needs-org-id` falla
+si una consulta a una tabla de org no restringe `org_id`.
 
 ## 4. Enrolamiento
 
@@ -217,6 +240,7 @@ señalización sellada y credenciales TURN de vida limitada.
 | §2 `orgId` = base32(sha256(orgPubKey))[0:20] | `deriveOrgId` / `orgIdMatchesKey` en `orgSig.ts` (los 3 paquetes) |
 | §3 canonicalización/firma | `mobile/src/crypto/{canonicalJson,orgSig}.ts`, `desktop/src/renderer/crypto/{canonicalJson,orgSig}.ts`, `server/src/crypto/{canonicalJson,orgSig}.ts`; vectores y tests: `orgSig.test.ts` + `orgSig.vectors.ts` en los 3 |
 | §2 cadena de certificados | `crypto/orgCert.ts` en los 3 paquetes (`signCertificate`, `verifyAdminCertificate`, `verifyMembershipCertificate`, `verifyDeviceApproval`); tests `orgCert.test.ts` en los 3 |
+| §3 puerta del relay (firma → cadena → rol → org → nonce) | `server/src/org/authorize.ts`, `org/roles.ts`, `org/nonceRepo.ts`; test `orgAuthorize.test.ts` |
 | §4 enrolamiento | `server/src/routes/enroll.ts`, `mobile/src/org/enroll.ts` |
 | §6 salas | `mobile/src/crypto/roomKey.ts`, `server/src/relay/handlers/rooms.ts` |
 | §7 retención | `server/src/org/retention.ts` |

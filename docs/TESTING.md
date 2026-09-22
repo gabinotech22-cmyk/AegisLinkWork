@@ -36,7 +36,11 @@ Otros workflows activos desde el día 0:
 - `semgrep.yml` — packs públicos + `.semgrep/aegislink-rules.yml`, que codifica las **Reglas de Oro de
   seguridad** (fail-closed, sin `plain:`, sin material de clave en logs…). Hereda las reglas del
   AegisLink normal; las reglas específicas Work (firmas admin atadas al payload, sin REST de mensajes)
-  se añaden en la fase 3 junto con el código que vigilan. Un hallazgo justificado con
+  se añaden conforme entra el código que vigilan: `aegislink-org-table-needs-org-id` (fase 3)
+  falla si una consulta a una tabla de organización no restringe `org_id` — en `TENANCY=multi`
+  una consulta sin ese filtro lee o muta filas de otra org en cuanto un id llega de fuera. Una
+  consulta de mantenimiento legítimamente global (purga por TTL) se anota con
+  `// nosemgrep: aegislink-org-table-needs-org-id` y su motivo. Un hallazgo justificado con
   `// nosemgrep: <regla>` (motivo en el comentario) se descarta del SARIF antes de subirlo:
   GitHub ignora la propiedad `suppressions` y, sin ese paso, cada supresión era una alerta
   abierta (`docs/AUDIT-2026-09-20-inherited-scan-alerts.md`). CodeQL no honra `lgtm[...]`: sus

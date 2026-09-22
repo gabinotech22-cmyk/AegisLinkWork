@@ -120,3 +120,29 @@ rules:
         - '*.test.tsx'
         - '*.spec.ts'
         - '**/__tests__/**'
+
+  - id: aegislink-org-table-needs-org-id
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A query against an organization-scoped table must constrain org_id.
+      In TENANCY=multi one relay serves many organizations, so a SELECT/UPDATE/
+      DELETE that omits org_id reads or mutates another org's rows the moment a
+      caller supplies an id from elsewhere (DEPLOYMENT-MODES.md; golden rule
+      "cero metadatos" + #7). Add `org_id = ?` to the WHERE clause, or — if the
+      query really is org-wide maintenance (a TTL purge) — annotate it with
+      `// nosemgrep: aegislink-org-table-needs-org-id` and say why.
+    metadata:
+      category: security
+      golden-rule: '7 — aislamiento entre organizaciones'
+    patterns:
+      # Any SQL string naming a Work table...
+      - pattern-regex: '(?i)(select|update|delete)[\s\S]{0,400}?\b(used_nonces|org_members|org_devices|org_rooms|org_room_members|org_policies|org_invites|org_audit)\b[\s\S]{0,400}'
+      # ...that never mentions org_id anywhere in the same statement.
+      - pattern-not-regex: '(?i)[\s\S]*org_id[\s\S]*'
+    paths:
+      exclude:
+        - '*.test.ts'
+        - '*.test.tsx'
+        - '*.spec.ts'
+        - '**/__tests__/**'
