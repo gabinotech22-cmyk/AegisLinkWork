@@ -30,6 +30,28 @@ Org signing key (Ed25519, owners)
   en el cliente).
 - Certificados con `notAfter` ≤ 1 año; renovación silenciosa por el admin (acción auditada).
 
+**Implementado** (PR #23): `orgCert.ts` en los tres paquetes. Lo que el código fija y este doc
+no decía:
+
+- **Un certificado NO es una acción `orgSig`.** Una acción es una autorización de un solo uso que
+  caduca en minutos y lleva nonce; un certificado es una declaración de situación válida hasta un
+  año y deliberadamente reutilizable (eso significa "presentar tu certificado"). Comparten
+  codificación canónica y prefijo de dominio, y por eso un certificado nunca puede reproducirse
+  como acción ni al revés: el prefijo lleva el `kind` (`cert.admin`, `cert.membership`,
+  `device.approve`) y los cuerpos exigen campos distintos.
+- **Solo un owner certifica a un admin o a otro owner.** Si un admin pudiera acuñar admins, las
+  filas "solo owner" de `ADMIN-CONSOLE.md` §3 serían inaplicables: se ascendería a sí mismo
+  emitiéndose el certificado. El verificador lo rechaza con `issuer_not_admin`.
+- **La aprobación de dispositivo se ata a su miembro**: `verifyDeviceApproval` compara el
+  `aegisId` de la aprobación con el del certificado de membresía ya verificado. Sin esa
+  comprobación, una aprobación legítima de un dispositivo autorizaría a hablar por otro miembro.
+- **El `orgId` se recalcula desde `orgPubKey`**, nunca se confía el que declara el certificado.
+- **La revocación no vive aquí**: un certificado sigue siendo criptográficamente válido después de
+  que a su sujeto lo echen. `revokedKeyIds` lo aporta quien llama desde el estado vivo del relay.
+- `issuerKeyId` es un índice (16 chars del mismo base32 que `orgId`), **no** un ancla de
+  confianza: se verifica siempre con la clave presentada en la cadena, nunca con una buscada por
+  ese id.
+
 ## 3. Canonicalización y firma de acciones (cierra H1)
 
 Toda acción administrativa y todo certificado se firman sobre un **payload canónico completo**:
@@ -194,6 +216,7 @@ señalización sellada y credenciales TURN de vida limitada.
 |---|---|
 | §2 `orgId` = base32(sha256(orgPubKey))[0:20] | `deriveOrgId` / `orgIdMatchesKey` en `orgSig.ts` (los 3 paquetes) |
 | §3 canonicalización/firma | `mobile/src/crypto/{canonicalJson,orgSig}.ts`, `desktop/src/renderer/crypto/{canonicalJson,orgSig}.ts`, `server/src/crypto/{canonicalJson,orgSig}.ts`; vectores y tests: `orgSig.test.ts` + `orgSig.vectors.ts` en los 3 |
+| §2 cadena de certificados | `crypto/orgCert.ts` en los 3 paquetes (`signCertificate`, `verifyAdminCertificate`, `verifyMembershipCertificate`, `verifyDeviceApproval`); tests `orgCert.test.ts` en los 3 |
 | §4 enrolamiento | `server/src/routes/enroll.ts`, `mobile/src/org/enroll.ts` |
 | §6 salas | `mobile/src/crypto/roomKey.ts`, `server/src/relay/handlers/rooms.ts` |
 | §7 retención | `server/src/org/retention.ts` |

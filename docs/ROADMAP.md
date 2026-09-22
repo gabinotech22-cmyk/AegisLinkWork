@@ -81,7 +81,11 @@ Criterio: `PROTOCOL.md` §3-§9 implementado con un test por endpoint/evento sen
 aislamiento entre orgs; `THREAT-MODEL.md` §3 con test enlazado en T1, T2, T3, T6, T9, T10, T12.
 - [x] Canonicalización + firma de acciones (`orgSig`) en los tres paquetes, con vectores dorados
       compartidos y 56 tests por paquete (PR #21; `PROTOCOL.md` §3 y §12).
-- [ ] Cadena de certificados (admin → membresía → aprobación de dispositivo) y `used_nonces`.
+- [x] Cadena de certificados admin → membresía → aprobación de dispositivo, anclada en la clave de
+      org pinneada, con 40 tests por paquete (PR #23; `PROTOCOL.md` §2). Incluye que solo un owner
+      certifica admins/owners y que la aprobación de dispositivo se ata a su miembro.
+- [ ] `used_nonces` (anti-replay de acciones) y la tabla rol → acción de `ADMIN-CONSOLE.md` §3
+      donde se ejecuta la acción.
 - [ ] Enrolamiento (`/enroll`), aprobación de dispositivo, revocación con rekey.
 - [ ] Orgs, equipos, miembros, salas, `room:key_dist/msg/rekey`, políticas, retención con TTL.
 - [ ] Audit log = firmas; exportación JSON/CSV escapada.
