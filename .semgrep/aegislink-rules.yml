@@ -92,8 +92,12 @@ rules:
         # logger.*, which internally reaches console. Flagging the abstraction
         # that enforces the rule is a false positive.
         - '**/logger.ts'
-        # Build-time config, not the shipped runtime bundle.
+        # Build-time config, not the shipped runtime bundle. Expo config
+        # plugins run only at prebuild and print to the prebuild log (same
+        # carve-out as .github/codeql/codeql-config.yml).
         - '**/metro.config.js'
+        - '**/plugins/*.js'
+        - '**/*.plugin.js'
 
   - id: aegislink-no-cors-wildcard
     languages: [typescript, javascript]

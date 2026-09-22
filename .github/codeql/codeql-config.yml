@@ -27,7 +27,7 @@ paths-ignore:
   # Dev/ops tooling, not the shipped app: one-off publish scripts, TURN cred
   # rotation, deploy helpers. (The legacy `// lgtm[...]` suppressions here no
   # longer work since lgtm.com was retired.)
-  - 'scripts/**'
+  - '**/scripts/**'
   - 'infra/**'
   # Expo config plugins run only at prebuild (build-time), never in the shipped
   # bundle; a build-time TOCTOU is out of the runtime threat model.
