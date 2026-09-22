@@ -84,8 +84,10 @@ aislamiento entre orgs; `THREAT-MODEL.md` §3 con test enlazado en T1, T2, T3, T
 - [x] Cadena de certificados admin → membresía → aprobación de dispositivo, anclada en la clave de
       org pinneada, con 40 tests por paquete (PR #23; `PROTOCOL.md` §2). Incluye que solo un owner
       certifica admins/owners y que la aprobación de dispositivo se ata a su miembro.
-- [ ] `used_nonces` (anti-replay de acciones) y la tabla rol → acción de `ADMIN-CONSOLE.md` §3
-      donde se ejecuta la acción.
+- [x] `used_nonces` (anti-replay atómico, aislado por org) y la tabla rol → acción de
+      `ADMIN-CONSOLE.md` §3, compuestas en `org/authorize.ts`: 42 tests (PR #24). Incluye la regla
+      Semgrep `aegislink-org-table-needs-org-id` que estaba aparcada desde la fase 2.
+- [ ] Enrolamiento (`/enroll`), aprobación de dispositivo, revocación con rekey.
 - [ ] Enrolamiento (`/enroll`), aprobación de dispositivo, revocación con rekey.
 - [ ] Orgs, equipos, miembros, salas, `room:key_dist/msg/rekey`, políticas, retención con TTL.
 - [ ] Audit log = firmas; exportación JSON/CSV escapada.

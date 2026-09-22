@@ -65,7 +65,7 @@ elimina, se adopta. Una PR que añada un dato al servidor añade su fila aquí.
 | Blobs de adjuntos cifrados + token de descarga | Sí, hasta TTL | Adjuntos | Clave del blob solo dentro del mensaje cifrado |
 | Políticas firmadas (payload completo, en claro) | Sí | Publicarlas a los dispositivos; el relay aplica límites de tamaño/TTL de cola | Son metadatos de la org, no de personas |
 | Audit log de acciones admin (evento, actor, target, firma, timestamp) | Sí | Rendición de cuentas de los admins ante la org | Tabla cerrada de eventos; nunca eventos de mensajería |
-| Nonces consumidos de invitaciones y acciones admin | Sí, hasta `exp` | Anti-replay | — |
+| Nonces consumidos de invitaciones y acciones admin | Sí, hasta `exp` | Anti-replay | — · Implementado: tabla `used_nonces` (`org_id` en la PK, purga por `expires_at`), `server/src/org/nonceRepo.ts`; test `orgAuthorize.test.ts` |
 | Timestamp de **encolado** de un sobre | Sí, hasta entrega | TTL / retención | No se persiste timestamp de entrega ni de lectura |
 | Socket autenticado ↔ dispositivo (en memoria) | No (solo RAM) | Enrutar entregas online | — |
 | Tokens push opacos (FCM/APNs) por dispositivo | Sí | Wake-up (payload siempre cifrado y sin contenido) | Igual que el personal |

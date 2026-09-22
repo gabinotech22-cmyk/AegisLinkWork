@@ -182,8 +182,18 @@ export async function initPgSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_skdq_recipient
       ON sender_key_dist_queue(recipient, created_at);
 
-    -- AegisLink Work tables removed (ROADMAP Hito 1, audit 2026-09-16). Orphaned
-    -- work_* / workspaces* tables on existing deployments are left untouched.
+    -- ── AegisLink Work: consumed action nonces (PROTOCOL.md §3) ────────────
+    -- See the SQLite schema for the why. org_id is part of the PRIMARY KEY so
+    -- two organizations can never burn each other's nonces.
+    CREATE TABLE IF NOT EXISTS used_nonces (
+      org_id     TEXT NOT NULL,
+      nonce      TEXT NOT NULL,
+      expires_at BIGINT NOT NULL,
+      PRIMARY KEY (org_id, nonce)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_used_nonces_expiry
+      ON used_nonces(expires_at);
 
     -- ── Public Channels (Phase 1, docs/SEALED-PUBLIC-CHANNELS.md) ──────────
   `);

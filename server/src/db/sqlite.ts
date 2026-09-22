@@ -206,6 +206,27 @@ export function initSqliteSchema(db: DatabaseSync) {
     CREATE INDEX IF NOT EXISTS idx_skdq_recipient
       ON sender_key_dist_queue(recipient, created_at);
 
+    -- ── AegisLink Work: consumed action nonces (PROTOCOL.md §3) ────────────
+    -- Anti-replay for signed org actions. A signature stays valid until its
+    -- exp, so without this table an admin's "approve device X" could be
+    -- replayed by anyone who saw it, as many times as they liked, for the whole
+    -- window. The row is the proof that this exact nonce was already spent.
+    --
+    -- org_id is part of the PRIMARY KEY, not a column to filter by later: two
+    -- organizations must never be able to burn each other's nonces, and in
+    -- TENANCY=multi that isolation has to be structural (DEPLOYMENT-MODES.md).
+    -- Already declared in THREAT-MODEL.md §4 ("nonces consumidos"): the relay
+    -- learns that an action happened, never what it said.
+    CREATE TABLE IF NOT EXISTS used_nonces (
+      org_id     TEXT NOT NULL,
+      nonce      TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      PRIMARY KEY (org_id, nonce)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_used_nonces_expiry
+      ON used_nonces(expires_at);
+
     -- AegisLink Work (enterprise orgs/channels) tables were removed from this
     -- repo (ROADMAP Hito 1, external audit 2026-09-16 AL-02/07/09). Existing
     -- deployments may still hold orphaned work_* / workspaces* tables: they are
